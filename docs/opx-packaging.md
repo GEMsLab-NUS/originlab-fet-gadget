@@ -4,12 +4,14 @@
 
 1. 将 `origin-app/FET Analyzer` 复制到：
 
-   `%LocalAppData%\OriginLab\Apps\FET Analyzer`
+   `%LocalAppData%\OriginLab\Apps\FET Gadget`
+
+   （目录名要用 `package.ini` 里的 App 名称 `FET Gadget`，不是仓库里的文件夹名 `FET Analyzer`。）
 
 2. 在 Origin Code Builder 中把该 App 文件夹加入 workspace。
 3. 右键 App 文件夹，选择 **Generate...** 打开 Package Manager。
 4. 核对 `package.ini` 中的元数据、App icon、Launch Script 和 Graph 启用条件。
-5. 用 Package Manager 的 **File > Save** 保存为 `FET Analyzer.opx`。
+5. 用 Package Manager 的 **File > Save** 保存为 `FET Gadget.opx`。
 6. 把生成的 `.opx` 拖入 Origin 完成安装或覆盖开发版本。
 
 Origin 官方 App 开发流程要求先生成并安装一次 OPX，App Gallery 才能正常管理和启动该 App。后续修改应从 Code Builder workspace 中的 App 文件夹再次执行 **Generate...**，不要直接打开旧 OPX 修改。
@@ -47,4 +49,4 @@ Origin 已正确注册为 COM Server 时，可在仓库根目录运行：
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\build-opx.ps1
 ```
 
-该脚本依次执行核心 Origin C 编译、`tests/FETAnalyzerSmoke.c` 运行时测试和 `mkOPX`，输出到 `build/FET Analyzer.opx`。
+该脚本依次执行核心 Origin C 编译、`tests/FETAnalyzerSmoke.c` 运行时测试和 `mkOPX`，输出到 `build/FET Gadget.opx`（`mkOPX` 按 `package.ini` 中的 App 名称 `FET Gadget` 打包，与仓库目录名 `FET Analyzer` 不同）。
