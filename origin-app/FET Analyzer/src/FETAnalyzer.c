@@ -38,6 +38,8 @@
 #define FET_COX_SIOX 3
 #define FET_COX_MANUAL_KAPPA 4
 #define FET_CURSOR_WIDTH 1.25
+#define FET_FORWARD_LINE_WIDTH 2.0
+#define FET_BACKWARD_LINE_WIDTH 1.0
 #define FET_FIT_EXTENSION 0.15
 #define FET_HYST_CURSOR "FET_HYST"
 #define FET_GRAPH_DATA_PAGE "FETGraphData"
@@ -138,7 +140,7 @@ static int _fet_rgb_color(int red, int green, int blue);
 static bool _fet_is_helper_plot(DataPlot& plot);
 static void _fet_style_plot(DataPlot& plot, int color, bool symbols,
                             int lineStyle = LINE_STYLE_SOLID,
-                            bool doubleCompound = false);
+                            double lineWidth = 2.0);
 static bool _fet_detect_scan_turn(const vector& vx, int& turnIndex);
 static void _fet_default_dialog_options(FETDialogOptions& options);
 static bool _fet_range_from_x_bounds_segment(DataPlot& plot,
@@ -968,7 +970,8 @@ static int _fet_add_segmented_visible_plots(GraphLayer& gl, Worksheet& wks,
     forwardRange.Add(wks, yColumn, "Y", yColumn, 0, forwardEnd);
     int forwardIndex = gl.AddPlot(forwardRange, IDM_PLOT_LINE);
     DataPlot forwardPlot = gl.DataPlots(forwardIndex);
-    _fet_style_plot(forwardPlot, color, false, LINE_STYLE_SOLID);
+    _fet_style_plot(forwardPlot, color, false, LINE_STYLE_SOLID,
+                   FET_FORWARD_LINE_WIDTH);
     _fet_attach_plot_to_axis(forwardPlot, axis);
     int added = forwardPlot ? 1 : 0;
 
@@ -979,7 +982,8 @@ static int _fet_add_segmented_visible_plots(GraphLayer& gl, Worksheet& wks,
         backwardRange.Add(wks, yColumn, "Y", yColumn, turnIndex, rowCount - 1);
         int backwardIndex = gl.AddPlot(backwardRange, IDM_PLOT_LINE);
         DataPlot backwardPlot = gl.DataPlots(backwardIndex);
-        _fet_style_plot(backwardPlot, color, false, LINE_STYLE_SOLID, true);
+        _fet_style_plot(backwardPlot, color, false, LINE_STYLE_SOLID,
+                       FET_BACKWARD_LINE_WIDTH);
         _fet_attach_plot_to_axis(backwardPlot, axis);
         if (backwardPlot)
             added++;
@@ -1028,7 +1032,8 @@ static int _fet_add_forward_backward_visible_plots(GraphLayer& gl, Worksheet& wk
         forwardRange.Add(wks, fwdYCol, "Y", fwdYCol, 0, fwdCount - 1);
         int forwardIndex = gl.AddPlot(forwardRange, IDM_PLOT_LINE);
         DataPlot forwardPlot = gl.DataPlots(forwardIndex);
-        _fet_style_plot(forwardPlot, color, false, LINE_STYLE_SOLID);
+        _fet_style_plot(forwardPlot, color, false, LINE_STYLE_SOLID,
+                       FET_FORWARD_LINE_WIDTH);
         _fet_attach_plot_to_axis(forwardPlot, axis);
         if (forwardPlot)
             added++;
@@ -1040,7 +1045,8 @@ static int _fet_add_forward_backward_visible_plots(GraphLayer& gl, Worksheet& wk
         backwardRange.Add(wks, bwdYCol, "Y", bwdYCol, 0, bwdCount - 1);
         int backwardIndex = gl.AddPlot(backwardRange, IDM_PLOT_LINE);
         DataPlot backwardPlot = gl.DataPlots(backwardIndex);
-        _fet_style_plot(backwardPlot, color, false, LINE_STYLE_SOLID, true);
+        _fet_style_plot(backwardPlot, color, false, LINE_STYLE_SOLID,
+                       FET_BACKWARD_LINE_WIDTH);
         _fet_attach_plot_to_axis(backwardPlot, axis);
         if (backwardPlot)
             added++;
@@ -2386,7 +2392,7 @@ static void _fet_range_x_limits(const XYRange& range, double& xmin, double& xmax
 }
 
 static void _fet_style_plot(DataPlot& plot, int color, bool symbols,
-                            int lineStyle, bool doubleCompound)
+                            int lineStyle, double lineWidth)
 {
     if (!plot)
         return;
@@ -2409,22 +2415,13 @@ static void _fet_style_plot(DataPlot& plot, int color, bool symbols,
     else
     {
         tr.Root.Line.Color.nVal = color;
-        tr.Root.Line.Width.dVal = 2.0;
+        tr.Root.Line.Width.dVal = lineWidth;
         tr.Root.Line.Style.nVal = lineStyle;
-        if (doubleCompound)
-            tr.Root.Line.Compound.nVal = 1;
     }
     if (0 == plot.UpdateThemeIDs(tr.Root))
         plot.ApplyFormat(tr, true, true);
     if (!symbols)
-    {
         plot.SetLineType(lineStyle);
-        if (doubleCompound)
-        {
-            int compound = 1;
-            plot.LabTalk("line.compound", &compound, true);
-        }
-    }
     if (symbols)
     {
         int fillTransparency = 45;
