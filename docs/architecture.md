@@ -44,7 +44,9 @@ App Gallery
 - The graph page is portrait, and both overlaid plot layers are sized to a 1:1
   width-to-height ratio. Origin preserves page paper ratios when assigning
   `page.width`/`page.height`, so the enforced ratio lives on the layer.
-- `FET_CONFIG` is a `FET Gadget` text-button at the plot's upper-right corner.
+- `FET_CONFIG` is a `FET Gadget` text-button at the plot's upper-right
+  corner (`label -p` positions are percent-of-frame with (0,0) at
+  bottom-left, so the Y coordinate must be near 100 to land near the top).
 - Solid `FET_SS_*` / `FET_VTH_*` cursors mark the forward (+) ranges.
 - Dash-dot `FET_BWD_SS_*` / `FET_BWD_VTH_*` cursors mark the backward (-)
   ranges, so they're visually distinct from the solid forward cursors even
@@ -54,6 +56,14 @@ App Gallery
   settings only skips backward analysis/plotting for that pass -- it leaves
   the backward cursors in place so switching back to "Both"/"Backward"
   immediately reuses them instead of starting from scratch.
+- scanMode also hides (`layer -hp`, never deletes) the forward/backward
+  visible curve for whichever direction isn't selected, so "Forward" in
+  Settings visibly removes the backward curve from the graph rather than
+  only skipping its analysis. Because a hidden segment now coexists with
+  the always-hidden full-range source plot, curve identification
+  (`_fet_get_analysis_plot_for_graph_layer`) keys off "the plot with the
+  most points" rather than "the only hidden plot" to find that source --
+  a segment is always a strict subset of it and can never have more points.
 - Settings persist curve/axis colors, scan mode, smoothing window, automatic
   fit-window sizes, minimum R-square, fit visibility, and marker visibility.
 
