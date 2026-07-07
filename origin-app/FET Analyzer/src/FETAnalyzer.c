@@ -725,14 +725,6 @@ static bool _fet_is_plot_from_page(DataPlot& plot, LPCSTR pageName)
     return dataset.Find(pageName) >= 0;
 }
 
-static bool _fet_is_plot_from_sheet(DataPlot& plot, LPCSTR sheetName)
-{
-    if (!plot)
-        return false;
-    string dataset = plot.GetDatasetName();
-    return dataset.Find(sheetName) >= 0;
-}
-
 static bool _fet_is_output_plot(DataPlot& plot)
 {
     if (!plot)
@@ -847,6 +839,7 @@ static DataPlot _fet_get_analysis_plot_for_graph_layer(GraphLayer& gl)
         int largestBackwardPoints = 0;
         int largestSameDatasetPoints = 0;
         int largestPoints = 0;
+        vector<string> distinctDatasets;
 
         for (int ii = 0; ii < rightLayer.DataPlots.Count(); ii++)
         {
@@ -857,6 +850,17 @@ static DataPlot _fet_get_analysis_plot_for_graph_layer(GraphLayer& gl)
             bool hasBackwardScan = _fet_plot_has_backward_scan(candidate,
                                                                candidatePoints);
             string candidateDataset = candidate.GetDatasetName();
+            bool datasetKnown = false;
+            for (int dd = 0; dd < distinctDatasets.GetSize(); dd++)
+            {
+                if (distinctDatasets[dd].CompareNoCase(candidateDataset) == 0)
+                {
+                    datasetKnown = true;
+                    break;
+                }
+            }
+            if (!datasetKnown)
+                distinctDatasets.Add(candidateDataset);
             if (hasBackwardScan && candidatePoints > largestBackwardPoints)
             {
                 largestBackwardSource = candidate;
@@ -887,12 +891,31 @@ static DataPlot _fet_get_analysis_plot_for_graph_layer(GraphLayer& gl)
                 firstVisibleSource = candidate;
             }
         }
-        // Curve identity (the dataset the user actually selected) must always
-        // win over any curve-agnostic "largest" guess below. Otherwise, on a
-        // graph with several imported curves, analysis can silently lock
-        // onto a different curve's backward segment just because it happens
-        // to have more points -- this previously made backward extraction
-        // look "wrong" even though the turn-detection math was fine.
+        // If the layer only holds one curve, use it directly -- there is no
+        // real ambiguity to resolve. This matters because Origin's "active
+        // plot" for a layer (what `selected` below is based on) drifts on
+        // its own as analysis adds/removes fit-line and marker plots across
+        // repeated runs, so trusting it even for a single-curve graph could
+        // resolve to a partial visible segment (e.g. just the forward half)
+        // instead of the full hidden source, silently losing the backward
+        // segment from data reorganization even though nothing about the
+        // curve itself changed.
+        if (distinctDatasets.GetSize() == 1)
+        {
+            if (firstHiddenSource)
+                return firstHiddenSource;
+            if (largestSource)
+                return largestSource;
+            if (firstVisibleSource)
+                return firstVisibleSource;
+        }
+        // Multiple curves: curve identity (the dataset the user actually
+        // selected) must always win over any curve-agnostic "largest" guess
+        // below. Otherwise, on a graph with several imported curves,
+        // analysis can silently lock onto a different curve's backward
+        // segment just because it happens to have more points -- this
+        // previously made backward extraction look "wrong" even though the
+        // turn-detection math was fine.
         if (largestSameDatasetSource)
             return largestSameDatasetSource;
         if (selected && !_fet_is_helper_plot(selected))
@@ -985,31 +1008,22 @@ static bool _fet_create_doubley_graph_from_plot(DataPlot& sourcePlot,
     if (!_fet_get_xy(input, vx, vy))
         return false;
 
-    WorksheetPage page;
-    page.Create("Origin");
-    page.SetName("FETGraphData", OCD_ENUM_NEXT);
-    Worksheet wks = page.Layers(0);
-    wks.SetName("Curves");
-    wks.SetSize(vx.GetSize(), 4);
-    wks.Columns(0).SetType(OKDATAOBJ_DESIGNATION_X);
-    wks.Columns(1).SetType(OKDATAOBJ_DESIGNATION_Y);
-    wks.Columns(0).SetLongName("Vg");
-    wks.Columns(1).SetLongName("Id");
-    wks.Columns(2).SetLongName("absId");
-    wks.Columns(3).SetLongName("logAbsId");
-    wks.Columns(0).SetUnits("V");
-    wks.Columns(1).SetUnits("A");
-    wks.Columns(2).SetUnits("A");
-    wks.Columns(3).SetUnits("log10(A)");
-    for (int ii = 0; ii < vx.GetSize(); ii++)
-    {
-        double absValue = fabs(vy[ii]);
-        wks.SetCell(ii, 0, vx[ii]);
-        wks.SetCell(ii, 1, vy[ii]);
-        wks.SetCell(ii, 2, absValue);
-        wks.SetCell(ii, 3, absValue > 0 ? log10(absValue) : NANUM);
-    }
-    wks.AutoSize();
+    // Use the same "Curves" sheet and column layout that every later
+    // fet_analyzer_refresh_preview() call writes via
+    // _fet_write_graph_curves_data(), instead of a separate bespoke layout
+    // on the same sheet. The two used to disagree about what each column
+    // meant, so whichever one ran most recently silently rewrote the
+    // other's columns out from under the plots still bound to them.
+    int turnIndex = -1;
+    bool hasBackward = _fet_detect_scan_turn(vx, turnIndex);
+    if (!_fet_write_graph_curves_data(vx, vy, turnIndex, hasBackward))
+        return false;
+    WorksheetPage page(FET_GRAPH_DATA_PAGE);
+    Worksheet wks;
+    if (page)
+        wks = page.Layers("Curves");
+    if (!wks)
+        return false;
 
     GraphPage gp;
     gp.Create("DOUBLEY");
@@ -1021,11 +1035,11 @@ static bool _fet_create_doubley_graph_from_plot(DataPlot& sourcePlot,
 
     FETDialogOptions graphOptions;
     _fet_get_effective_dialog_options(graphOptions);
-    _fet_add_segmented_visible_plots(leftLayer, wks, 0, 3, vx.GetSize(), vx,
+    _fet_add_segmented_visible_plots(leftLayer, wks, 8, 11, vx.GetSize(), vx,
                                      graphOptions.logCurveColor, FET_AXIS_LEFT);
-    _fet_add_segmented_visible_plots(rightLayer, wks, 0, 1, vx.GetSize(), vx,
+    _fet_add_segmented_visible_plots(rightLayer, wks, 8, 9, vx.GetSize(), vx,
                                      graphOptions.linearCurveColor, FET_AXIS_RIGHT);
-    _fet_add_hidden_source_plot(rightLayer, wks, 0, 1, vx.GetSize(),
+    _fet_add_hidden_source_plot(rightLayer, wks, 8, 9, vx.GetSize(),
                                 FET_AXIS_RIGHT);
 
     _fet_configure_transfer_graph(leftLayer);
@@ -1085,125 +1099,6 @@ static bool _fet_rebuild_log_layer(GraphLayer& leftLayer,
                                             FET_AXIS_LEFT) > 0;
 }
 
-static bool _fet_layer_has_visible_graph_curves(GraphLayer& gl)
-{
-    if (!gl)
-        return false;
-    for (int ii = 0; ii < gl.DataPlots.Count(); ii++)
-    {
-        DataPlot plot = gl.DataPlots(ii);
-        if (plot && plot.IsShow()
-            && _fet_is_plot_from_page(plot, FET_GRAPH_DATA_PAGE)
-            && _fet_is_plot_from_sheet(plot, "Curves"))
-            return true;
-    }
-    return false;
-}
-
-static bool _fet_column_long_name_equals(Worksheet& wks, int col, LPCSTR name)
-{
-    if (!wks || col < 0 || col >= wks.GetNumCols())
-        return false;
-    string longName = wks.Columns(col).GetLongName();
-    return longName.CompareNoCase(name) == 0;
-}
-
-static int _fet_find_split_graph_curves_block(Worksheet& wks)
-{
-    if (!wks)
-        return -1;
-    for (int cc = 0; cc + 5 < wks.GetNumCols(); cc++)
-    {
-        if (_fet_column_long_name_equals(wks, cc, "Forward Vg")
-            && _fet_column_long_name_equals(wks, cc + 1, "Forward Id")
-            && _fet_column_long_name_equals(wks, cc + 4, "Backward Vg")
-            && _fet_column_long_name_equals(wks, cc + 5, "Backward Id"))
-            return cc;
-    }
-    return -1;
-}
-
-static int _fet_append_column_pair_xy(Worksheet& wks, int xCol, int yCol,
-                                      vector& vx, vector& vy)
-{
-    int added = 0;
-    for (int rr = 0; rr < wks.GetNumRows(); rr++)
-    {
-        double x = wks.Cell(rr, xCol);
-        double y = wks.Cell(rr, yCol);
-        if (_fet_valid_number(x) && _fet_valid_number(y))
-        {
-            vx.Add(x);
-            vy.Add(y);
-            added++;
-        }
-    }
-    return added;
-}
-
-static void _fet_remove_hidden_graph_curves_sources(GraphLayer& gl)
-{
-    if (!gl)
-        return;
-    for (int ii = gl.DataPlots.Count() - 1; ii >= 0; ii--)
-    {
-        DataPlot plot = gl.DataPlots(ii);
-        if (plot && !plot.IsShow()
-            && _fet_is_plot_from_page(plot, FET_GRAPH_DATA_PAGE)
-            && _fet_is_plot_from_sheet(plot, "Curves"))
-            gl.RemovePlot(ii);
-    }
-}
-
-static bool _fet_add_hidden_source_from_split_graph_curves(GraphLayer& rightLayer)
-{
-    if (!rightLayer || !_fet_layer_has_visible_graph_curves(rightLayer))
-        return false;
-
-    WorksheetPage graphData(FET_GRAPH_DATA_PAGE);
-    Worksheet wks;
-    if (graphData)
-        wks = graphData.Layers("Curves");
-    if (!wks)
-        return false;
-
-    int blockCol = _fet_find_split_graph_curves_block(wks);
-    if (blockCol < 0)
-        return false;
-
-    vector vx, vy;
-    int forwardPoints = _fet_append_column_pair_xy(wks, blockCol, blockCol + 1,
-                                                  vx, vy);
-    int backwardPoints = _fet_append_column_pair_xy(wks, blockCol + 4,
-                                                   blockCol + 5, vx, vy);
-    if (forwardPoints < FET_MIN_POINTS || backwardPoints < FET_MIN_POINTS)
-        return false;
-
-    int sourceXCol = blockCol + 16;
-    int sourceYCol = sourceXCol + 1;
-    wks.SetSize(max(wks.GetNumRows(), vx.GetSize()), sourceYCol + 1);
-    wks.Columns(sourceXCol).SetType(OKDATAOBJ_DESIGNATION_X);
-    wks.Columns(sourceYCol).SetType(OKDATAOBJ_DESIGNATION_Y);
-    wks.Columns(sourceXCol).SetLongName("Combined Source Vg");
-    wks.Columns(sourceYCol).SetLongName("Combined Source Id");
-    wks.Columns(sourceXCol).SetUnits("V");
-    wks.Columns(sourceYCol).SetUnits("A");
-    for (int rr = 0; rr < wks.GetNumRows(); rr++)
-    {
-        wks.SetCell(rr, sourceXCol, NANUM);
-        wks.SetCell(rr, sourceYCol, NANUM);
-    }
-    for (rr = 0; rr < vx.GetSize(); rr++)
-    {
-        wks.SetCell(rr, sourceXCol, vx[rr]);
-        wks.SetCell(rr, sourceYCol, vy[rr]);
-    }
-
-    _fet_remove_hidden_graph_curves_sources(rightLayer);
-    return _fet_add_hidden_source_plot(rightLayer, wks, sourceXCol, sourceYCol,
-                                       vx.GetSize(), FET_AXIS_RIGHT);
-}
-
 static GraphLayer _fet_prepare_graph_for_analysis(GraphLayer& activeLayer)
 {
     GraphLayer analysisLayer = activeLayer;
@@ -1218,7 +1113,6 @@ static GraphLayer _fet_prepare_graph_for_analysis(GraphLayer& activeLayer)
     if (rightLayer && rightLayer.DataPlots.Count() > 0)
     {
         GraphLayer leftLayer = gp.Layers(0);
-        _fet_add_hidden_source_from_split_graph_curves(rightLayer);
         _fet_rebuild_log_layer(leftLayer, rightLayer);
         _fet_configure_transfer_graph(leftLayer);
         _fet_configure_linear_transfer_graph(rightLayer);
@@ -2697,42 +2591,50 @@ static Worksheet _fet_fit_sheet(bool clearExisting)
 
 static Worksheet _fet_curves_sheet(bool clearExisting)
 {
-    return _fet_graph_data_sheet("Curves", 8, clearExisting);
+    return _fet_graph_data_sheet("Curves", 10, clearExisting);
 }
 
+// Columns 0-7 are the forward/backward split (each restarting at row 0),
+// used for the user-facing table. Columns 8-9 are the full curve verbatim,
+// in original order, unsplit -- this is the one stable, always-consistent
+// source that hidden/segmented plots for a graph built by
+// _fet_create_doubley_graph_from_plot can bind to. Earlier this function
+// only ever wrote 0-7 and that same graph type separately owned its own
+// bespoke 4-column layout on this exact sheet; whichever of the two ran
+// last clobbered the other's columns out from under any plot still bound
+// to them (backward data silently vanishing after any re-analysis). Always
+// writing both here, unconditionally, removes that conflict instead of
+// working around it.
 static bool _fet_write_graph_curves_data(const vector& vx, const vector& vy,
-                                         int turnIndex, bool hasBackward,
-                                         bool preserveSourceColumns = false)
+                                         int turnIndex, bool hasBackward)
 {
-    Worksheet wks = _fet_curves_sheet(!preserveSourceColumns);
+    Worksheet wks = _fet_curves_sheet(true);
     if (!wks)
         return false;
-    int cOffset = preserveSourceColumns ? 8 : 0;
     int rows = max(vx.GetSize(), 1);
-    wks.SetSize(max(wks.GetNumRows(), rows),
-                max(wks.GetNumCols(), cOffset + 8));
+    wks.SetSize(max(wks.GetNumRows(), rows), 12);
     vector<string> names = {
         "Forward Vg", "Forward Id", "Forward |Id|", "Forward log10(|Id|)",
-        "Backward Vg", "Backward Id", "Backward |Id|", "Backward log10(|Id|)"
+        "Backward Vg", "Backward Id", "Backward |Id|", "Backward log10(|Id|)",
+        "Combined Vg", "Combined Id", "Combined |Id|", "Combined log10(|Id|)"
     };
     vector<string> units = {
-        "V", "A", "A", "", "V", "A", "A", ""
+        "V", "A", "A", "", "V", "A", "A", "", "V", "A", "A", ""
     };
     for (int cc = 0; cc < names.GetSize(); cc++)
     {
-        int colIndex = cOffset + cc;
-        wks.Columns(colIndex).SetLongName(names[cc]);
-        wks.Columns(colIndex).SetUnits(units[cc]);
-        if (cc == 0 || cc == 4)
-            wks.Columns(colIndex).SetType(OKDATAOBJ_DESIGNATION_X);
+        wks.Columns(cc).SetLongName(names[cc]);
+        wks.Columns(cc).SetUnits(units[cc]);
+        if (cc == 0 || cc == 4 || cc == 8)
+            wks.Columns(cc).SetType(OKDATAOBJ_DESIGNATION_X);
         else
-            wks.Columns(colIndex).SetType(OKDATAOBJ_DESIGNATION_Y);
+            wks.Columns(cc).SetType(OKDATAOBJ_DESIGNATION_Y);
     }
 
     for (int rr = 0; rr < wks.GetNumRows(); rr++)
     {
-        for (int cc = 0; cc < 8; cc++)
-            wks.SetCell(rr, cOffset + cc, NANUM);
+        for (int cc = 0; cc < 12; cc++)
+            wks.SetCell(rr, cc, NANUM);
     }
 
     int forwardEnd = hasBackward ? turnIndex : vx.GetSize() - 1;
@@ -2741,11 +2643,11 @@ static bool _fet_write_graph_curves_data(const vector& vx, const vector& vy,
     for (ii = 0; ii <= forwardEnd && ii < vx.GetSize(); ii++)
     {
         double absId = fabs(vy[ii]);
-        wks.SetCell(row, cOffset + 0, vx[ii]);
-        wks.SetCell(row, cOffset + 1, vy[ii]);
-        wks.SetCell(row, cOffset + 2, absId);
+        wks.SetCell(row, 0, vx[ii]);
+        wks.SetCell(row, 1, vy[ii]);
+        wks.SetCell(row, 2, absId);
         if (absId > 0)
-            wks.SetCell(row, cOffset + 3, log10(absId));
+            wks.SetCell(row, 3, log10(absId));
         row++;
     }
 
@@ -2755,13 +2657,23 @@ static bool _fet_write_graph_curves_data(const vector& vx, const vector& vy,
         for (ii = turnIndex; ii < vx.GetSize(); ii++)
         {
             double absId = fabs(vy[ii]);
-            wks.SetCell(row, cOffset + 4, vx[ii]);
-            wks.SetCell(row, cOffset + 5, vy[ii]);
-            wks.SetCell(row, cOffset + 6, absId);
+            wks.SetCell(row, 4, vx[ii]);
+            wks.SetCell(row, 5, vy[ii]);
+            wks.SetCell(row, 6, absId);
             if (absId > 0)
-                wks.SetCell(row, cOffset + 7, log10(absId));
+                wks.SetCell(row, 7, log10(absId));
             row++;
         }
+    }
+
+    for (ii = 0; ii < vx.GetSize(); ii++)
+    {
+        double absId = fabs(vy[ii]);
+        wks.SetCell(ii, 8, vx[ii]);
+        wks.SetCell(ii, 9, vy[ii]);
+        wks.SetCell(ii, 10, absId);
+        if (absId > 0)
+            wks.SetCell(ii, 11, log10(absId));
     }
     wks.AutoSize();
     return true;
@@ -3430,11 +3342,7 @@ int fet_analyzer_refresh_preview()
         _fet_remove_backward_range_cursors(leftLayer);
     if (!useBackward)
         _fet_delete_graph_object(leftLayer, FET_HYST_CURSOR);
-    bool preserveGraphSource = _fet_is_plot_from_page(activePlot,
-                                                      FET_GRAPH_DATA_PAGE)
-                            && _fet_is_plot_from_sheet(activePlot, "Curves");
-    _fet_write_graph_curves_data(vx, vy, turnIndex, hasBackward,
-                                 preserveGraphSource);
+    _fet_write_graph_curves_data(vx, vy, turnIndex, hasBackward);
 
     string curveLabel = activePlot.GetDatasetName();
     string forwardKey = curveLabel + " [+]";
