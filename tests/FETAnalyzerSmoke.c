@@ -18,6 +18,7 @@ int fet_analyzer_reapply_graph_style_for_test();
 int fet_analyzer_prepare_active_graph_for_test();
 void fet_analyzer_reset_options_for_test();
 void fet_analyzer_set_scan_mode_for_test(int scanMode);
+int fet_analyzer_analyze_active_for_test();
 
 static int _fet_smoke_check_double_y(GraphLayer& leftLayer,
                                      GraphLayer& rightLayer,
@@ -782,6 +783,92 @@ int fet_analyzer_runtime_smoke()
         return 690;
     if (!doubleLayer.GraphObjects("FET_SUMMARY_MINUS"))
         return 691;
+
+    fet_analyzer_reset_options_for_test();
+
+    // scanMode must hide (not delete) the non-selected direction's visible
+    // curve on the "analyze a plain plot" path (_fet_create_doubley_graph_
+    // from_plot / FETAnalysisGraph), and show it again on Both -- exercised
+    // via the same double-scan data used above but as a fresh plain plot.
+    GraphPage plainGraph;
+    plainGraph.Create("Origin");
+    plainGraph.SetName("FETVisibilitySmokeGraph", OCD_ENUM_NEXT);
+    GraphLayer plainLayer = plainGraph.Layers(0);
+    XYRange plainRange;
+    plainRange.Add(doubleWks, 0, "X", 0, 0, doubleX.GetSize() - 1);
+    plainRange.Add(doubleWks, 1, "Y", 1, 0, doubleY.GetSize() - 1);
+    int plainPlotIndex = plainLayer.AddPlot(plainRange, IDM_PLOT_LINE);
+    if (plainPlotIndex < 0)
+        return 800;
+    plainGraph.SetShow(PAGE_ACTIVATE);
+    set_active_layer(plainLayer);
+    int visErr1 = fet_analyzer_analyze_active_for_test();
+    if (visErr1 != 0)
+        return 801;
+
+    GraphPage visGraph("FETAnalysisGraph");
+    if (!visGraph)
+        return 802;
+    GraphLayer visLeft = visGraph.Layers(0);
+    GraphLayer visRight = visGraph.Layers.Count() > 1 ? visGraph.Layers(1) : visLeft;
+    if (!visLeft || !visRight)
+        return 803;
+    visGraph.SetShow(PAGE_ACTIVATE);
+    set_active_layer(visRight);
+    int visErr2 = fet_analyzer_analyze_active_for_test();
+    if (visErr2 != 0)
+        return 804;
+
+    fet_analyzer_set_scan_mode_for_test(1); // FET_SCAN_FORWARD
+    set_active_layer(visRight);
+    int visErrFwd = fet_analyzer_analyze_active_for_test();
+    if (visErrFwd != 0)
+        return 810;
+    // Fit lines/markers for the unused direction are still expected to be
+    // removed (not just hidden) here -- only the raw forward/backward data
+    // segments must survive as hidden rather than deleted.
+    int hiddenVisible = 0, hiddenHidden = 0;
+    for (int vv = 0; vv < visRight.DataPlots.Count(); vv++)
+    {
+        DataPlot p = visRight.DataPlots(vv);
+        if (!p)
+            continue;
+        XYRange pr;
+        p.GetDataRange(pr, 0, -1);
+        vector px, py;
+        if (!pr.GetData(py, px) || px.GetSize() == 0 || px.GetSize() >= doubleX.GetSize()
+            || p.GetDatasetName().Find("FETFitData") >= 0)
+            continue; // skip the hidden full-range source and fit/marker plots
+        if (p.IsShow())
+            hiddenVisible++;
+        else
+            hiddenHidden++;
+    }
+    if (hiddenVisible != 1 || hiddenHidden != 1)
+        return 812;
+
+    fet_analyzer_set_scan_mode_for_test(3); // FET_SCAN_BOTH
+    set_active_layer(visRight);
+    int visErrBoth = fet_analyzer_analyze_active_for_test();
+    if (visErrBoth != 0)
+        return 820;
+    int visibleSegments = 0;
+    for (int ww = 0; ww < visRight.DataPlots.Count(); ww++)
+    {
+        DataPlot p = visRight.DataPlots(ww);
+        if (!p)
+            continue;
+        XYRange pr;
+        p.GetDataRange(pr, 0, -1);
+        vector px, py;
+        if (!pr.GetData(py, px) || px.GetSize() == 0 || px.GetSize() >= doubleX.GetSize()
+            || p.GetDatasetName().Find("FETFitData") >= 0)
+            continue;
+        if (p.IsShow())
+            visibleSegments++;
+    }
+    if (visibleSegments != 2)
+        return 821;
 
     fet_analyzer_reset_options_for_test();
     return 0;

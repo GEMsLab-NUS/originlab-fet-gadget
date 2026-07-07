@@ -841,7 +841,6 @@ static DataPlot _fet_get_analysis_plot_for_graph_layer(GraphLayer& gl)
         int largestBackwardPoints = 0;
         int largestSameDatasetPoints = 0;
         int largestPoints = 0;
-        int hiddenCount = 0;
         vector<string> distinctDatasets;
 
         for (int ii = 0; ii < rightLayer.DataPlots.Count(); ii++)
@@ -883,27 +882,35 @@ static DataPlot _fet_get_analysis_plot_for_graph_layer(GraphLayer& gl)
             }
             if (!candidate.IsShow())
             {
-                hiddenCount++;
+                // No early return here even on a dataset match: a segment
+                // that scanMode has hidden (see
+                // _fet_set_curve_segment_visibility) is also "hidden" but is
+                // NOT the analysis source, and it can match selectedDataset
+                // just as well as the true hidden source can. Let the
+                // largestSameDatasetSource/largestSource checks below decide
+                // instead -- they compare point counts, so the full-range
+                // source (always the largest) wins over a hidden segment.
                 if (!firstHiddenSource)
                     firstHiddenSource = candidate;
-                if (!selectedDataset.IsEmpty()
-                    && candidateDataset.CompareNoCase(selectedDataset) == 0)
-                    return candidate;
             }
             else if (!firstVisibleSource)
             {
                 firstVisibleSource = candidate;
             }
         }
-        // Exactly one hidden full-range source plot means there is exactly
-        // one curve to analyze, no matter how many differently-labeled
-        // visible segments (forward/backward can have distinct dataset
-        // names from each other and from the hidden source) sit alongside
-        // it -- the hidden plot is always the one true analysis source for
-        // its curve, so use it directly rather than falling through to
-        // "selected"-based disambiguation that doesn't apply here.
-        if (hiddenCount == 1 && firstHiddenSource)
-            return firstHiddenSource;
+        // The plot with the most points in the layer can only be a
+        // full-range hidden source -- forward/backward segments are always
+        // strict subsets of it. So if that largest plot is hidden, it is
+        // unambiguously the one true analysis source for its curve, no
+        // matter how many differently-labeled visible segments (forward/
+        // backward can have distinct dataset names from each other and from
+        // the hidden source) sit alongside it, and regardless of whether
+        // scanMode has also hidden the non-analyzed segment (which would
+        // otherwise make more than one candidate look "hidden" here). Use
+        // it directly rather than falling through to "selected"-based
+        // disambiguation that doesn't apply to a single-curve layer.
+        if (largestSource && !largestSource.IsShow())
+            return largestSource;
         // If the layer only holds one curve, use it directly -- there is no
         // real ambiguity to resolve. This matters because Origin's "active
         // plot" for a layer (what `selected` below is based on) drifts on
@@ -915,10 +922,14 @@ static DataPlot _fet_get_analysis_plot_for_graph_layer(GraphLayer& gl)
         // curve itself changed.
         if (distinctDatasets.GetSize() == 1)
         {
-            if (firstHiddenSource)
-                return firstHiddenSource;
+            // largestSource before firstHiddenSource: point count is a more
+            // reliable "is this the full curve" signal than "is it hidden"
+            // now that scanMode can hide a segment too (the case where the
+            // true source itself is hidden is already handled above).
             if (largestSource)
                 return largestSource;
+            if (firstHiddenSource)
+                return firstHiddenSource;
             if (firstVisibleSource)
                 return firstVisibleSource;
         }
@@ -2233,7 +2244,10 @@ static void _fet_add_config_button(GraphLayer& gl)
     GraphObject button = gl.GraphObjects(FET_CONFIG_BUTTON);
     if (!button)
     {
-        gl.LT_execute("label -p 88 12 -j 1 -n FET_CONFIG [FET Gadget];");
+        // -p is percent-of-frame with (0,0) at bottom-left, so Y needs to be
+        // near 100 (not near 0) to land in the top-right corner -- the old
+        // Y=12 put this in the lower-right, right on top of the curve data.
+        gl.LT_execute("label -p 88 97 -j 1 -n FET_CONFIG [FET Gadget];");
         button = gl.GraphObjects(FET_CONFIG_BUTTON);
     }
     if (!button)
@@ -3358,6 +3372,70 @@ int fet_analyze_xf_core(const XYRange& input, const XYRange& ssRange,
     return 0;
 }
 
+// Shows/hides (never deletes) the visible forward/backward segment plots
+// for the curve currently being analyzed, so choosing "Forward" in Settings
+// actually hides the backward curve on the graph instead of just skipping
+// its analysis. The hidden full-range source plot always has as many
+// points as the whole curve (vx.GetSize()), so any visible candidate with
+// fewer points is a segment, not the source -- and among segments, the one
+// starting at vx[0] is forward, the one starting at vx[turnIndex] is
+// backward. Restricting to candidates whose overall X span matches this
+// curve's avoids touching a different curve's segments in a multi-curve
+// graph.
+static void _fet_set_curve_segment_visibility(GraphLayer& gl, const vector& vx,
+                                              int turnIndex, bool hasBackward,
+                                              bool showForward, bool showBackward)
+{
+    if (!gl || !hasBackward || vx.GetSize() == 0)
+        return;
+
+    double curveMin = vx[0], curveMax = vx[0];
+    int ii;
+    for (ii = 1; ii < vx.GetSize(); ii++)
+    {
+        if (vx[ii] < curveMin) curveMin = vx[ii];
+        if (vx[ii] > curveMax) curveMax = vx[ii];
+    }
+    double forwardStartX = vx[0];
+    double backwardStartX = vx[turnIndex];
+
+    set_active_layer(gl);
+    for (ii = 0; ii < gl.DataPlots.Count(); ii++)
+    {
+        DataPlot candidate = gl.DataPlots(ii);
+        if (!candidate || _fet_is_helper_plot(candidate))
+            continue;
+
+        XYRange candidateRange;
+        candidate.GetDataRange(candidateRange, 0, -1);
+        vector cx, cy;
+        if (!_fet_get_xy(candidateRange, cx, cy) || cx.GetSize() == 0
+            || cx.GetSize() >= vx.GetSize())
+            continue;
+
+        double cMin = cx[0], cMax = cx[0];
+        int jj;
+        for (jj = 1; jj < cx.GetSize(); jj++)
+        {
+            if (cx[jj] < cMin) cMin = cx[jj];
+            if (cx[jj] > cMax) cMax = cx[jj];
+        }
+        if (fabs(cMin - curveMin) > 1e-9 || fabs(cMax - curveMax) > 1e-9)
+            continue;
+
+        bool isForward = fabs(cx[0] - forwardStartX) < 1e-9;
+        bool isBackward = !isForward && fabs(cx[0] - backwardStartX) < 1e-9;
+        if (!isForward && !isBackward)
+            continue;
+        bool wantShow = isForward ? showForward : showBackward;
+        if (wantShow == candidate.IsShow())
+            continue;
+        string script;
+        script.Format("layer -hp %d %d;", wantShow ? 0 : 1, ii + 1);
+        gl.LT_execute(script);
+    }
+}
+
 int fet_analyzer_refresh_preview()
 {
     GraphLayer gl;
@@ -3399,6 +3477,13 @@ int fet_analyzer_refresh_preview()
     if (!useBackward)
         _fet_delete_graph_object(leftLayer, FET_HYST_CURSOR);
     _fet_write_graph_curves_data(vx, vy, turnIndex, hasBackward);
+
+    GraphLayer rightLayer = graphPage && graphPage.Layers.Count() > 1
+                          ? graphPage.Layers(1) : gl;
+    _fet_set_curve_segment_visibility(leftLayer, vx, turnIndex, hasBackward,
+                                      useForward, useBackward);
+    _fet_set_curve_segment_visibility(rightLayer, vx, turnIndex, hasBackward,
+                                      useForward, useBackward);
 
     string curveLabel = activePlot.GetDatasetName();
     string forwardKey = curveLabel + " [+]";
