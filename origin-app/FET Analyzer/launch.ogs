@@ -1,0 +1,10 @@
+[Main]
+// %@A resolves to the installed Origin Apps root.
+int err = run.loadoc("%@A\FET Gadget\src\FETAnalyzer.c", 16);
+if (err != 0)
+{
+    type -b "FET Gadget: failed to compile/load Origin C source (error $(err)).\n%@A\FET Gadget\src\FETAnalyzer.c";
+    return;
+}
+
+fet_analyzer_start();

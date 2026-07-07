@@ -1,0 +1,113 @@
+$ErrorActionPreference = 'Stop'
+
+$root = Split-Path -Parent $PSScriptRoot
+$app = Join-Path $root 'origin-app\FET Analyzer'
+$required = @(
+    'package.ini',
+    'launch.ogs',
+    'AppIcon.png',
+    'FETAnalyzer16.bmp',
+    'src\FETAnalyzer.c',
+    'xfunctions\fet_analyze.variables.md',
+    'examples\FET_transfer_sample.csv',
+    'examples\FET_transfer_double_scan.csv',
+    'examples\README.md'
+)
+
+$missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $app $_)) })
+if ($missing.Count -gt 0) {
+    throw "Missing package files: $($missing -join ', ')"
+}
+
+$packageIni = Join-Path $app 'package.ini'
+$ini = Get-Content -LiteralPath $packageIni -Raw
+foreach ($needle in @('Name=FET Gadget', 'Version=0.6', 'LaunchScript=launch.ogs', 'Always=1', 'Graph=1', 'Workbook=1')) {
+    if (-not $ini.Contains($needle)) {
+        throw "package.ini does not contain '$needle'"
+    }
+}
+$sourceVersion = [regex]::Match($ini, '(?m)^Version=(.+)$').Groups[1].Value.Trim()
+
+$launch = Get-Content -LiteralPath (Join-Path $app 'launch.ogs') -Raw
+if (-not $launch.Contains('run.loadoc') -or -not $launch.Contains('fet_analyzer_start')) {
+    throw 'launch.ogs does not load and invoke the Origin C entry point'
+}
+if (-not $launch.Contains('%@A\FET Gadget\src\FETAnalyzer.c')) {
+    throw 'launch.ogs does not use the installed App source path'
+}
+
+$source = Get-Content -LiteralPath (Join-Path $app 'src\FETAnalyzer.c') -Raw
+if (-not $source.Contains('[CSV Files (*.csv)] *.csv')) {
+    throw 'CSV open dialog filter is not configured for visible .csv files'
+}
+if (-not $source.Contains('fet_analyzer_get_launch_mode()') -or -not $source.Contains('fet_analyzer_import_csv()')) {
+    throw 'App entry point does not route graph and non-graph launches'
+}
+if (-not $source.Contains('FET Gadget v0.6')) {
+    throw 'Origin C dialog title does not expose the current app version'
+}
+if (-not $source.Contains('FET_CURSOR_SS_START') -or -not $source.Contains('FET_CURSOR_VTH_START')) {
+    throw 'Graph launch does not define SS/Vth free cursor objects'
+}
+if (-not $source.Contains('HMOVE=1') -or -not $source.Contains('fet_analyzer_ranges_from_free_cursors')) {
+    throw 'Graph launch does not create free movable SS/Vth range cursors'
+}
+if (-not $source.Contains('layer.y.type=0') -or -not $source.Contains('layer.y.label.pre$=\"10\\+(\"') -or -not $source.Contains('baseCol + 5') -or -not $source.Contains('SetAttachedAxis')) {
+    throw 'Imported graph is not configured as logAbsId/Id overlaid linear-axis plot'
+}
+if (-not $source.Contains('fet_analyzer_show_settings') -or -not $source.Contains('FET_CONFIG')) {
+    throw 'Graph does not expose the FET Analyzer settings button'
+}
+foreach ($needle in @(
+    'label -r legend',
+    'FET Gadget',
+    'label -p 88 12 -j 1 -n FET_CONFIG',
+    '.background=0;',
+    '_fet_add_horizontal_cursor_line',
+    '_fet_plot_has_backward_scan',
+    'options.coxMode = FET_COX_HFOX',
+    '|\\i(I)\\-(d)| (uA/um)',
+    '\\i(I)\\-(d) (uA/um)',
+    '\\i(V)\\-(g) (V)',
+    'layer.y.label.pre$=\"10\\+(\"',
+    'layer.y.label.numFormat=1',
+    'layer.y2.label.numFormat=1',
+    'layer.x.grid.show=1',
+    'layer.y.from=0',
+    'gp.Resize(420, 420, 101)',
+    'page.kar=0;page.width=4560;page.height=4560',
+    'page.zoomWhole=1',
+    'layer.width=76;layer.height=76',
+    '_fet_remove_backward_range_cursors',
+    'LINE_STYLE_SHORT_DASH',
+    'line.compound',
+    '.VMOVE=1;',
+    '_fet_add_segmented_visible_plots',
+    '_fet_add_hidden_source_plot',
+    'tr.Root.Symbol.Shape.nVal = 2',
+    'plot.SetSymbol(11)',
+    'tr.Root.Symbol.FillColor.nVal = color'
+)) {
+    if (-not $source.Contains($needle)) {
+        throw "Requested graph formatting is missing '$needle'"
+    }
+}
+if (-not $source.Contains('_fet_find_vg_column') -or -not $source.Contains('Vg_V') -or -not $source.Contains('Id_A')) {
+    throw 'CSV importer does not support ordinary Vg/Id table headers'
+}
+if (-not $source.Contains('FailedDetails') -or -not $source.Contains('_fet_import_error_text')) {
+    throw 'CSV importer does not expose per-file failure details'
+}
+
+Write-Host 'FET Gadget package skeleton: OK'
+Write-Host "Source package version: $sourceVersion"
+$installedIni = Join-Path $env:LOCALAPPDATA 'OriginLab\Apps\FET Gadget\package.ini'
+if (Test-Path -LiteralPath $installedIni) {
+    $installed = Get-Content -LiteralPath $installedIni -Raw
+    $installedVersion = [regex]::Match($installed, '(?m)^Version=(.+)$').Groups[1].Value.Trim()
+    Write-Host "Installed app version: $installedVersion"
+    if ($installedVersion -ne $sourceVersion) {
+        Write-Warning "Installed FET Gadget is not current. Rebuild/reinstall the OPX to update it."
+    }
+}
+Write-Host 'Run tools/build-opx.ps1 for Origin C compile, runtime smoke test, and OPX generation.'

@@ -1,0 +1,8 @@
+*.opx
+*.opju
+*.opj
+*.op
+*.ocb
+*.ocw
+build/
+

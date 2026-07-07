@@ -1,0 +1,82 @@
+# Architecture
+
+## Runtime Flow
+
+```text
+App Gallery
+  -> launch.ogs
+  -> run.loadoc(.../src/FETAnalyzer.c)
+  -> fet_analyzer_start()
+  -> route by active window
+      -> workbook/no graph:
+           Import Data
+           -> GetMultiOpenBox
+           -> CSV importer
+           -> Curves/RawMeta workbook only
+      -> active graph:
+           Analyze Graph
+           -> build overlaid logAbsId/Id layers
+           -> detect single or forward/backward scan segments
+           -> read solid (+) and dash-dot (-) free cursor lines
+           -> convert cursor X bounds to segment-local XYRange objects
+           -> Origin C calculation core
+           -> graph annotations + hidden fit-data workbook
+           -> [FETResults]Summary
+```
+
+## Responsibilities
+
+- Origin C parses CSV files, creates worksheets, creates graphs, computes parameters, and writes output.
+- LabTalk is used for App launch, graph-object cursor glue, graph formatting, and graph-object button scripting.
+- Graph cursors are free movable line objects, not Data Selector ranges. They do not snap to data points and are used only to mark X bounds.
+
+## Graph Model
+
+- Each imported curve writes six columns: `Vg`, `Id`, `Ig`, `absId`, `Vd`, `logAbsId`.
+- Each acquisition direction is a separate visible plot. A double scan therefore
+  creates forward and backward plots instead of one line crossing the turn point.
+- The right layer also contains one hidden full-range source plot per imported
+  curve. Analysis reads this source so visual segmentation does not break paired
+  forward/backward extraction.
+- The left layer plots `logAbsId`; its scientific tick labels transform the data
+  to `|I_d| (uA/um)`. The right axis transforms `Id` to `I_d (uA/um)` and starts
+  at zero. Both conversions use the configured channel width.
+- The graph page is portrait, and both overlaid plot layers are sized to a 1:1
+  width-to-height ratio. Origin preserves page paper ratios when assigning
+  `page.width`/`page.height`, so the enforced ratio lives on the layer.
+- `FET_CONFIG` is a `FET Gadget` text-button at the plot's upper-right corner.
+- Solid `FET_SS_*` / `FET_VTH_*` cursors mark the forward (+) ranges.
+- Dash-dot `FET_BWD_SS_*` / `FET_BWD_VTH_*` cursors mark the backward (-)
+  ranges, so they're visually distinct from the solid forward cursors even
+  in the same color.
+- Backward cursors are only removed when the curve has no backward segment
+  at all (a data fact from scan-turn detection). Choosing "Forward" in
+  settings only skips backward analysis/plotting for that pass -- it leaves
+  the backward cursors in place so switching back to "Both"/"Backward"
+  immediately reuses them instead of starting from scratch.
+- Settings persist curve/axis colors, scan mode, smoothing window, automatic
+  fit-window sizes, minimum R-square, fit visibility, and marker visibility.
+
+## Analysis Output
+
+- SS and linear-range fit lines are dashed, extended beyond their selected
+  ranges, and use a dark blend of their associated curve color.
+- Ion is a non-movable full-width short-dash reference level. Ioff defaults to
+  the mean absolute current in the recognized off/SS region and is shown as a
+  movable horizontal short-dash cursor; moving it refreshes Ion/Ioff.
+- Extracted points are semi-transparent filled circles with solid edges.
+- Forward and backward results are labeled `[+]` and `[-]`.
+- Parameter tables are attached to the upper-left of the layer frame.
+- Results are upserted into `[FETGraphData]Extracted Parameters`, one row per
+  curve per direction, keyed by `"<curve dataset> [+]"` / `"[-]"` (the
+  `Curve` column). Re-analyzing the same curve (e.g. while dragging a cursor
+  to refine SS/Vth ranges) updates its existing row in place; analyzing a
+  different curve or graph appends new rows instead of overwriting.
+
+## Remaining Extensions
+
+1. Persist graph-specific settings in graph-object storage or page tree.
+2. Add constant-current and maximum-gm Vth methods.
+3. Add hysteresis reporting between paired forward/backward results.
+4. Add gate leakage analysis from `Ig`.
+5. Add batch report export.
