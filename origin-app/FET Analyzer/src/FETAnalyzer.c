@@ -839,6 +839,7 @@ static DataPlot _fet_get_analysis_plot_for_graph_layer(GraphLayer& gl)
         int largestBackwardPoints = 0;
         int largestSameDatasetPoints = 0;
         int largestPoints = 0;
+        int hiddenCount = 0;
         vector<string> distinctDatasets;
 
         for (int ii = 0; ii < rightLayer.DataPlots.Count(); ii++)
@@ -880,6 +881,7 @@ static DataPlot _fet_get_analysis_plot_for_graph_layer(GraphLayer& gl)
             }
             if (!candidate.IsShow())
             {
+                hiddenCount++;
                 if (!firstHiddenSource)
                     firstHiddenSource = candidate;
                 if (!selectedDataset.IsEmpty()
@@ -891,6 +893,15 @@ static DataPlot _fet_get_analysis_plot_for_graph_layer(GraphLayer& gl)
                 firstVisibleSource = candidate;
             }
         }
+        // Exactly one hidden full-range source plot means there is exactly
+        // one curve to analyze, no matter how many differently-labeled
+        // visible segments (forward/backward can have distinct dataset
+        // names from each other and from the hidden source) sit alongside
+        // it -- the hidden plot is always the one true analysis source for
+        // its curve, so use it directly rather than falling through to
+        // "selected"-based disambiguation that doesn't apply here.
+        if (hiddenCount == 1 && firstHiddenSource)
+            return firstHiddenSource;
         // If the layer only holds one curve, use it directly -- there is no
         // real ambiguity to resolve. This matters because Origin's "active
         // plot" for a layer (what `selected` below is based on) drifts on
@@ -996,6 +1007,47 @@ static DataPlot _fet_add_hidden_source_plot(GraphLayer& gl, Worksheet& wks,
     return sourcePlot;
 }
 
+// Forward and backward already live in their own column pairs (each
+// restarting at row 0), so this just adds one plot per direction directly
+// -- unlike _fet_add_segmented_visible_plots, it doesn't need to re-detect
+// a turn point in a single continuous column. Using this instead of
+// re-splitting the combined columns is what gives these plots distinct
+// "Forward Id"/"Backward Id" labels instead of both showing up as the
+// generic "Combined Id" the hidden source also uses.
+static int _fet_add_forward_backward_visible_plots(GraphLayer& gl, Worksheet& wks,
+                                                    int fwdXCol, int fwdYCol,
+                                                    int fwdCount, int bwdXCol,
+                                                    int bwdYCol, int bwdCount,
+                                                    int color, int axis)
+{
+    int added = 0;
+    if (gl && wks && fwdCount >= FET_MIN_POINTS)
+    {
+        DataRange forwardRange;
+        forwardRange.Add(wks, fwdXCol, "X", fwdXCol, 0, fwdCount - 1);
+        forwardRange.Add(wks, fwdYCol, "Y", fwdYCol, 0, fwdCount - 1);
+        int forwardIndex = gl.AddPlot(forwardRange, IDM_PLOT_LINE);
+        DataPlot forwardPlot = gl.DataPlots(forwardIndex);
+        _fet_style_plot(forwardPlot, color, false, LINE_STYLE_SOLID);
+        _fet_attach_plot_to_axis(forwardPlot, axis);
+        if (forwardPlot)
+            added++;
+    }
+    if (gl && wks && bwdCount >= FET_MIN_POINTS)
+    {
+        DataRange backwardRange;
+        backwardRange.Add(wks, bwdXCol, "X", bwdXCol, 0, bwdCount - 1);
+        backwardRange.Add(wks, bwdYCol, "Y", bwdYCol, 0, bwdCount - 1);
+        int backwardIndex = gl.AddPlot(backwardRange, IDM_PLOT_LINE);
+        DataPlot backwardPlot = gl.DataPlots(backwardIndex);
+        _fet_style_plot(backwardPlot, color, false, LINE_STYLE_SOLID, true);
+        _fet_attach_plot_to_axis(backwardPlot, axis);
+        if (backwardPlot)
+            added++;
+    }
+    return added;
+}
+
 static bool _fet_create_doubley_graph_from_plot(DataPlot& sourcePlot,
                                                 GraphLayer& outLeftLayer)
 {
@@ -1033,12 +1085,19 @@ static bool _fet_create_doubley_graph_from_plot(DataPlot& sourcePlot,
     if (!leftLayer || !rightLayer)
         return false;
 
+    int forwardCount = hasBackward ? turnIndex + 1 : vx.GetSize();
+    int backwardCount = hasBackward ? vx.GetSize() - turnIndex : 0;
+
     FETDialogOptions graphOptions;
     _fet_get_effective_dialog_options(graphOptions);
-    _fet_add_segmented_visible_plots(leftLayer, wks, 8, 11, vx.GetSize(), vx,
-                                     graphOptions.logCurveColor, FET_AXIS_LEFT);
-    _fet_add_segmented_visible_plots(rightLayer, wks, 8, 9, vx.GetSize(), vx,
-                                     graphOptions.linearCurveColor, FET_AXIS_RIGHT);
+    _fet_add_forward_backward_visible_plots(leftLayer, wks, 0, 3, forwardCount,
+                                            4, 7, backwardCount,
+                                            graphOptions.logCurveColor,
+                                            FET_AXIS_LEFT);
+    _fet_add_forward_backward_visible_plots(rightLayer, wks, 0, 1, forwardCount,
+                                            4, 5, backwardCount,
+                                            graphOptions.linearCurveColor,
+                                            FET_AXIS_RIGHT);
     _fet_add_hidden_source_plot(rightLayer, wks, 8, 9, vx.GetSize(),
                                 FET_AXIS_RIGHT);
 
