@@ -16,6 +16,13 @@
 App 内部名称为 **FET Gadget**（`package.ini` / OPX 文件名 / Origin Apps 目录下的文件夹名都是
 `FET Gadget`），仓库目录沿用了早期的 `FET Analyzer` 命名，两者指同一个 App。
 
+<p align="center">
+  <img src="docs/demo.png" alt="FET Gadget 在 Origin 中分析正反向 Id-Vg 扫描" width="720">
+  <br>
+  <sub>双轴 Id-Vg 图，带可拖动的拟合区间 cursor，正向（<code>[+]</code>）/ 反向（<code>[-]</code>）
+  参数摘要直接叠加在图上。</sub>
+</p>
+
 ## 目录
 
 - [功能](#功能)

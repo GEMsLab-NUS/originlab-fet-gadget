@@ -18,6 +18,13 @@ The App's internal identity is **FET Gadget** (that's the name in `package.ini`,
 and the folder Origin installs it under); the repository folder is still named `FET Analyzer` from
 an earlier iteration — both names refer to the same App.
 
+<p align="center">
+  <img src="docs/demo.png" alt="FET Gadget analyzing a forward/backward Id-Vg sweep in Origin" width="720">
+  <br>
+  <sub>Dual-axis Id-Vg graph with draggable fit-window cursors and the forward (<code>[+]</code>) /
+  backward (<code>[-]</code>) parameter summary drawn directly on the plot.</sub>
+</p>
+
 ## Table of Contents
 
 - [Features](#features)
