@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
-  <a href="#环境要求"><img alt="Origin" src="https://img.shields.io/badge/Origin-10.3%2B-blue.svg"></a>
+  <a href="#环境要求"><img alt="Origin" src="https://img.shields.io/badge/Origin-2018%2B-blue.svg"></a>
   <a href="../../releases"><img alt="Release" src="https://img.shields.io/badge/release-latest-brightgreen.svg"></a>
   <a href="docs/architecture.md"><img alt="Origin C" src="https://img.shields.io/badge/built%20with-Origin%20C-informational.svg"></a>
 </p>
@@ -53,7 +53,10 @@ App 内部名称为 **FET Gadget**（`package.ini` / OPX 文件名 / Origin Apps
 
 ## 环境要求
 
-- **Origin 或 OriginPro 2022 及以上**（`package.ini` 中声明的最低版本为 **10.3**）。
+- **Origin 或 OriginPro 2018 及以上**（`package.ini` 中声明的最低版本为 **9.5**，对应 Origin
+  2018——App Gallery/OPX 打包机制大致是从这个年代开始成熟的；比这更早、没有 App Gallery 的版本，
+  不管这个数字写多少都装不上）。代码本身只用到了长期存在的基础 Origin C / Apps API，但这个下限
+  没有在真实的 Origin 2018 上跑过验证，遇到版本相关的问题欢迎[提 issue](../../issues)。
 - Windows（Origin C / OPX 打包工具链本身是 Windows-only）。
 - 从源码构建（`tools/build-opx.ps1`）额外需要：
   - Origin 已在本机注册为 COM Server（正常安装即会注册）。

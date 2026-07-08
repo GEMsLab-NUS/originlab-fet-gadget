@@ -9,7 +9,7 @@
 #include <xfutils.h>
 #include <sys_utils.h>
 
-#define FET_APP_TITLE "FET Gadget v0.7.1"
+#define FET_APP_TITLE "FET Gadget v0.7.2"
 #define FET_MIN_POINTS 3
 #define FET_IMPORT_COLS_PER_CURVE 6
 #define FET_LAUNCH_IMPORT_CSV 1

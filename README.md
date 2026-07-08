@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
-  <a href="#requirements"><img alt="Origin" src="https://img.shields.io/badge/Origin-10.3%2B-blue.svg"></a>
+  <a href="#requirements"><img alt="Origin" src="https://img.shields.io/badge/Origin-2018%2B-blue.svg"></a>
   <a href="../../releases"><img alt="Release" src="https://img.shields.io/badge/release-latest-brightgreen.svg"></a>
   <a href="docs/architecture.md"><img alt="Origin C" src="https://img.shields.io/badge/built%20with-Origin%20C-informational.svg"></a>
 </p>
@@ -55,7 +55,12 @@ an earlier iteration — both names refer to the same App.
 
 ## Requirements
 
-- **Origin or OriginPro 2022 or later** (`package.ini` declares a minimum of **10.3**).
+- **Origin or OriginPro 2018 or later** (`package.ini` declares a minimum of **9.5**, matching
+  Origin 2018 — that's roughly when OriginLab's App Gallery/OPX packaging matured; the App can't
+  install at all on versions that predate App Gallery support, regardless of this number). The
+  code itself only uses long-standing Origin C / Apps APIs, but this floor hasn't been verified by
+  actually running on Origin 2018 — please [open an issue](../../issues) if you hit a version-
+  specific problem.
 - Windows (the Origin C / OPX toolchain is Windows-only).
 - To build from source, additionally:
   - Origin registered as a COM server on the machine (this happens automatically on a normal install).

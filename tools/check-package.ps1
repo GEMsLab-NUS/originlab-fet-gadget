@@ -21,7 +21,7 @@ if ($missing.Count -gt 0) {
 
 $packageIni = Join-Path $app 'package.ini'
 $ini = Get-Content -LiteralPath $packageIni -Raw
-foreach ($needle in @('Name=FET Gadget', 'Version=0.7.1', 'LaunchScript=launch.ogs', 'Always=1', 'Graph=1', 'Workbook=1')) {
+foreach ($needle in @('Name=FET Gadget', 'Version=0.7.2', 'LaunchScript=launch.ogs', 'Always=1', 'Graph=1', 'Workbook=1')) {
     if (-not $ini.Contains($needle)) {
         throw "package.ini does not contain '$needle'"
     }
@@ -43,7 +43,7 @@ if (-not $source.Contains('[CSV Files (*.csv)] *.csv')) {
 if (-not $source.Contains('fet_analyzer_get_launch_mode()') -or -not $source.Contains('fet_analyzer_import_csv()')) {
     throw 'App entry point does not route graph and non-graph launches'
 }
-if (-not $source.Contains('FET Gadget v0.7.1')) {
+if (-not $source.Contains('FET Gadget v0.7.2')) {
     throw 'Origin C dialog title does not expose the current app version'
 }
 if (-not $source.Contains('FET_CURSOR_SS_START') -or -not $source.Contains('FET_CURSOR_VTH_START')) {
