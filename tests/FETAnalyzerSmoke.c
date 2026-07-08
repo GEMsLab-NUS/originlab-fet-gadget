@@ -90,7 +90,7 @@ static int _fet_smoke_find_summary_row(Worksheet& wks, LPCSTR key)
     if (rows <= 0)
         return -1;
     StringArray sa;
-    wks.Columns(32).GetStringArray(sa);
+    wks.Columns(33).GetStringArray(sa);
     for (int rr = 0; rr < rows; rr++)
     {
         string cell = rr < sa.GetSize() ? sa[rr] : "";
@@ -878,6 +878,11 @@ int fet_analyzer_runtime_smoke()
         return 670;
     if (doubleLayer.GraphObjects("FET_SUMMARY_MINUS"))
         return 671;
+    // Forward-only mode has no backward segment to compare against, so the
+    // hysteresis cursor/panel must be removed, not left showing a stale
+    // reading.
+    if (doubleLayer.GraphObjects("FET_HYST") || doubleLayer.GraphObjects("FET_HYST_SUMMARY"))
+        return 672;
 
     fet_analyzer_set_scan_mode_for_test(3); // FET_SCAN_BOTH
     int bothAgainErr = fet_analyzer_refresh_preview();
@@ -890,6 +895,59 @@ int fet_analyzer_runtime_smoke()
         return 690;
     if (!doubleLayer.GraphObjects("FET_SUMMARY_MINUS"))
         return 691;
+
+    // Hysteresis cursor: freshly recreated (scanMode Forward deleted it
+    // above), so it must default to the vertical center of the left axis's
+    // current Y range, not the old data-overlap-midpoint heuristic.
+    if (!doubleLayer.GraphObjects("FET_HYST") || !doubleLayer.GraphObjects("FET_HYST_SUMMARY"))
+        return 900;
+    doubleLayer.LT_execute("__FET_HYST_TEST_FROM=layer.y.from;__FET_HYST_TEST_TO=layer.y.to;__FET_HYST_Y0=FET_HYST.y1;");
+    double hystAxisFrom = 0, hystAxisTo = 0, hystY0 = 0;
+    if (!LT_get_var("__FET_HYST_TEST_FROM", &hystAxisFrom)
+        || !LT_get_var("__FET_HYST_TEST_TO", &hystAxisTo)
+        || !LT_get_var("__FET_HYST_Y0", &hystY0)
+        || hystAxisTo <= hystAxisFrom)
+        return 901;
+    double hystAxisSpan = hystAxisTo - hystAxisFrom;
+    double hystAxisCenter = (hystAxisFrom + hystAxisTo) / 2.0;
+    if (fabs(hystY0 - hystAxisCenter) > 0.02 * hystAxisSpan)
+        return 902;
+
+    GraphObject hystSummaryObj = doubleLayer.GraphObjects("FET_HYST_SUMMARY");
+    if (!hystSummaryObj)
+        return 903;
+    string hystSummaryText = hystSummaryObj.Text;
+    if (hystSummaryText.Find("[+/-]") < 0 || hystSummaryText.Find("\\g(D)V\\-(line)") < 0
+        || hystSummaryText.Find("\\g(D)V\\-(log)") < 0)
+        return 908;
+
+    // Drag the cursor away from center and refresh: the new position must
+    // survive (this is the actual bug being fixed -- it used to silently
+    // snap back to a freshly recomputed default on every refresh).
+    double hystDraggedY = hystAxisFrom + 0.25 * hystAxisSpan;
+    string hystDragScript;
+    hystDragScript.Format("FET_HYST.y1=%.15g;FET_HYST.y2=%.15g;", hystDraggedY, hystDraggedY);
+    doubleLayer.LT_execute(hystDragScript);
+    int hystDragRefreshErr = fet_analyzer_refresh_preview();
+    if (hystDragRefreshErr != 0)
+        return 904;
+    doubleLayer.LT_execute("__FET_HYST_Y1=FET_HYST.y1;");
+    double hystY1 = 0;
+    if (!LT_get_var("__FET_HYST_Y1", &hystY1)
+        || fabs(hystY1 - hystDraggedY) > 0.02 * hystAxisSpan)
+        return 905;
+
+    // Both delta columns must land in the summary sheet: either a plausible
+    // Vg-range value or NaN (out-of-range on one side), never garbage.
+    double hystDeltaLog = doubleExtracted.Cell(doubleForwardRow, 26);
+    double hystDeltaLinear = doubleExtracted.Cell(doubleForwardRow, 27);
+    double vgSpan = fabs(vx[vx.GetSize() - 1] - vx[0]);
+    if (!is_missing_value(hystDeltaLog)
+        && (hystDeltaLog < 0 || hystDeltaLog > vgSpan))
+        return 906;
+    if (!is_missing_value(hystDeltaLinear)
+        && (hystDeltaLinear < 0 || hystDeltaLinear > vgSpan))
+        return 907;
 
     fet_analyzer_reset_options_for_test();
 

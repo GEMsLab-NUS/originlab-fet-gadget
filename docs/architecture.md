@@ -84,8 +84,11 @@ App Gallery
   (`_fet_get_analysis_plot_for_graph_layer`) keys off "the plot with the
   most points" rather than "the only hidden plot" to find that source --
   a segment is always a strict subset of it and can never have more points.
-- Settings persist curve/axis colors, scan mode, smoothing window, automatic
-  fit-window sizes, minimum R-square, fit visibility, and marker visibility.
+- Settings persist scan mode, smoothing window, automatic fit-window sizes,
+  minimum R-square, fit visibility, and marker visibility. Curve/axis/marker
+  colors are fixed (`_fet_default_dialog_options`), not user-configurable --
+  the color pickers/presets that used to live under the "Graph" settings
+  branch were removed by request.
 
 ## Analysis Output
 
@@ -94,6 +97,29 @@ App Gallery
 - Ion is a non-movable full-width short-dash reference level. Ioff defaults to
   the mean absolute current in the recognized off/SS region and is shown as a
   movable horizontal short-dash cursor; moving it refreshes Ion/Ioff.
+- The hysteresis marker (`FET_HYST`) is a single user-movable horizontal
+  cursor on the left (log) layer, drawn only when a backward segment is
+  actively analyzed. It defaults to the vertical center of the left axis's
+  *final* Y range (computed after Ion/Ioff-driven axis expansion, so it
+  matches what's actually displayed) the first time it's created, and
+  otherwise keeps whatever Y the user last dragged it to. Because leftLayer
+  and rightLayer are fully overlaid on the same physical frame, the
+  fraction of leftLayer's Y range the cursor sits at is also the fraction of
+  rightLayer's Y range -- so the same cursor position yields two data-space
+  levels (log for the left axis, linear Id for the right axis) without a
+  second cursor. A `FET_HYST_SUMMARY` panel (labeled `[+/-]`, since it
+  compares forward against backward rather than reporting one direction)
+  shows both resulting Vg deltas as `\g(D)V-(line)` and `\g(D)V-(log)`; a
+  level either segment never reaches shows as "N/A" rather than a bogus
+  number. Both deltas are also written to
+  `[FETGraphData]Extracted Parameters` (`Hyst Delta Vg` / `Hyst Delta Vg
+  (linear)`) on the curve's forward (`[+]`) row.
+- Scale-attached two-point lines (`_fet_add_scale_line`, used for the Ion
+  reference line and the hysteresis cursor) must re-apply their `x1/y1/x2/y2`
+  endpoints *after* `.ATTACH` is set, not just at `draw -lm` creation time --
+  LabTalk does not retroactively reinterpret an object's already-set
+  coordinates when its attach mode changes, so skipping this silently
+  strands the object at the wrong Y.
 - Extracted points are semi-transparent filled circles with solid edges.
 - Forward and backward results are labeled `[+]` and `[-]`.
 - Parameter tables are attached to the upper-left of the layer frame.
@@ -107,6 +133,5 @@ App Gallery
 
 1. Persist graph-specific settings in graph-object storage or page tree.
 2. Add constant-current and maximum-gm Vth methods.
-3. Add hysteresis reporting between paired forward/backward results.
-4. Add gate leakage analysis from `Ig`.
-5. Add batch report export.
+3. Add gate leakage analysis from `Ig`.
+4. Add batch report export.

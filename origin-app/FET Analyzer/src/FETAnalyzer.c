@@ -9,7 +9,7 @@
 #include <xfutils.h>
 #include <sys_utils.h>
 
-#define FET_APP_TITLE "FET Gadget v0.7.3"
+#define FET_APP_TITLE "FET Gadget v0.7.4"
 #define FET_MIN_POINTS 3
 #define FET_IMPORT_COLS_PER_CURVE 6
 #define FET_LAUNCH_IMPORT_CSV 1
@@ -42,6 +42,7 @@
 #define FET_BACKWARD_LINE_WIDTH 1.0
 #define FET_FIT_EXTENSION 0.15
 #define FET_HYST_CURSOR "FET_HYST"
+#define FET_HYST_SUMMARY "FET_HYST_SUMMARY"
 #define FET_GRAPH_DATA_PAGE "FETGraphData"
 
 typedef struct tagFETOptions
@@ -80,6 +81,7 @@ typedef struct tagFETResult
     double hysteresis_forward_Vg;
     double hysteresis_backward_Vg;
     double hysteresis_delta_Vg;
+    double hysteresis_delta_Vg_linear;
     string source_range;
     string ss_range;
     string vth_range;
@@ -130,9 +132,6 @@ typedef struct tagFETDialogOptions
     int ssColor;
     int vthColor;
     int markerColor;
-    int logCurveColorPreset;
-    int linearCurveColorPreset;
-    int markerColorPreset;
 } FETDialogOptions;
 
 static void _fet_add_config_button(GraphLayer& gl);
@@ -219,47 +218,6 @@ static double _fet_effective_cox(const FETOptions& options)
     if (kappa <= 0 || options.oxideThickness_nm <= 0)
         return NANUM;
     return 8.854187817e-14 * kappa / (options.oxideThickness_nm * 1.0e-7);
-}
-
-static int _fet_color_preset(int group, int preset, int currentColor)
-{
-    if (preset <= 0)
-        return currentColor;
-
-    if (group == 0)
-    {
-        if (preset == 1)
-            return _fet_rgb_color(67, 56, 202);
-        if (preset == 2)
-            return _fet_rgb_color(8, 145, 178);
-        if (preset == 3)
-            return _fet_rgb_color(37, 99, 235);
-        if (preset == 4)
-            return _fet_rgb_color(126, 34, 206);
-    }
-    if (group == 1)
-    {
-        if (preset == 1)
-            return _fet_rgb_color(217, 119, 6);
-        if (preset == 2)
-            return _fet_rgb_color(225, 29, 72);
-        if (preset == 3)
-            return _fet_rgb_color(202, 138, 4);
-        if (preset == 4)
-            return _fet_rgb_color(22, 163, 74);
-    }
-    if (group == 2)
-    {
-        if (preset == 1)
-            return _fet_rgb_color(194, 65, 61);
-        if (preset == 2)
-            return _fet_rgb_color(79, 70, 229);
-        if (preset == 3)
-            return _fet_rgb_color(245, 158, 11);
-        if (preset == 4)
-            return _fet_rgb_color(75, 85, 99);
-    }
-    return currentColor;
 }
 
 static int _fet_rgb_color(int red, int green, int blue)
@@ -2650,6 +2608,28 @@ static void _fet_add_scale_line(GraphLayer& gl, LPCSTR name,
                   name, x1, y1, x2, y2);
     script += name;
     script += ".ATTACH=2;";
+    // "draw -lm" places the object under whatever the default attach mode
+    // is at creation time, and setting .ATTACH afterward does not
+    // retroactively reinterpret the coordinates it was created with under
+    // the new mode -- the object silently lands somewhere else entirely.
+    // Re-apply the real endpoints now that scale-attach is actually in
+    // effect.
+    script += name;
+    string x1Text;
+    x1Text.Format(".x1=%.15g;", x1);
+    script += x1Text;
+    script += name;
+    string y1Text;
+    y1Text.Format(".y1=%.15g;", y1);
+    script += y1Text;
+    script += name;
+    string x2Text;
+    x2Text.Format(".x2=%.15g;", x2);
+    script += x2Text;
+    script += name;
+    string y2Text;
+    y2Text.Format(".y2=%.15g;", y2);
+    script += y2Text;
     script += name;
     string colorText;
     colorText.Format(".color=%d;", color);
@@ -2953,42 +2933,64 @@ static bool _fet_find_vg_at_log_current(const vector& vx, const vector& vy,
     return false;
 }
 
-static bool _fet_hysteresis_default_level(const vector& vy,
-                                          int turnIndex,
-                                          double& targetLog)
+static bool _fet_find_vg_at_linear_current(const vector& vx, const vector& vy,
+                                           int begin, int end,
+                                           double targetLinear, double& vg)
 {
-    double forwardMin = 1e300, forwardMax = -1e300;
-    double backwardMin = 1e300, backwardMax = -1e300;
-    int ii;
-    for (ii = 0; ii <= turnIndex; ii++)
+    begin = _fet_clamp_int(begin, 0, vx.GetSize() - 1);
+    end = _fet_clamp_int(end, begin, vx.GetSize() - 1);
+    for (int ii = begin; ii < end; ii++)
     {
-        double value = fabs(vy[ii]);
-        if (value > 0)
+        double y1 = vy[ii];
+        double y2 = vy[ii + 1];
+        double d1 = y1 - targetLinear;
+        double d2 = y2 - targetLinear;
+        if (d1 == 0)
         {
-            double lv = log10(value);
-            forwardMin = min(forwardMin, lv);
-            forwardMax = max(forwardMax, lv);
+            vg = vx[ii];
+            return true;
+        }
+        if (d1 * d2 <= 0 && fabs(y2 - y1) > 1e-30)
+        {
+            double fraction = (targetLinear - y1) / (y2 - y1);
+            vg = vx[ii] + fraction * (vx[ii + 1] - vx[ii]);
+            return true;
         }
     }
-    for (ii = turnIndex; ii < vy.GetSize(); ii++)
-    {
-        double value = fabs(vy[ii]);
-        if (value > 0)
-        {
-            double lv = log10(value);
-            backwardMin = min(backwardMin, lv);
-            backwardMax = max(backwardMax, lv);
-        }
-    }
-    double low = max(forwardMin, backwardMin);
-    double high = min(forwardMax, backwardMax);
-    if (!_fet_valid_number(low) || !_fet_valid_number(high) || high <= low)
-        return false;
-    targetLog = (low + high) / 2.0;
-    return true;
+    return false;
 }
 
-static bool _fet_update_hysteresis_cursor(GraphLayer& gl,
+static bool _fet_layer_y_range(GraphLayer& gl, double& from, double& to)
+{
+    set_active_layer(gl);
+    gl.LT_execute("__FET_HYST_Y_FROM=layer.y.from;__FET_HYST_Y_TO=layer.y.to;");
+    from = NANUM;
+    to = NANUM;
+    LT_get_var("__FET_HYST_Y_FROM", &from);
+    LT_get_var("__FET_HYST_Y_TO", &to);
+    return _fet_valid_number(from) && _fet_valid_number(to) && to > from;
+}
+
+static void _fet_format_delta_v(double value, string& out)
+{
+    if (_fet_valid_number(value))
+        out.Format("%.4g V", value);
+    else
+        out = "N/A";
+}
+
+// The hysteresis cursor is a single user-movable horizontal line drawn on
+// leftLayer (log axis). Because leftLayer and rightLayer are fully overlaid
+// on the same physical frame (see docs/architecture.md), the fraction of
+// leftLayer's Y range the cursor sits at is also the fraction of
+// rightLayer's Y range it sits at -- so one dragged line yields two
+// data-space Y levels (log for the left/log axis, linear for the right/Id
+// axis) without needing a separate cursor per layer. Vg is found at each
+// level independently on the forward and backward segments; a level the
+// curve never reaches on one side (out of that segment's data range) leaves
+// the corresponding delta as NaN rather than a bogus number.
+static bool _fet_update_hysteresis_cursor(GraphLayer& leftLayer,
+                                          GraphLayer& rightLayer,
                                           const vector& vx,
                                           const vector& vy,
                                           int turnIndex,
@@ -2999,16 +3001,25 @@ static bool _fet_update_hysteresis_cursor(GraphLayer& gl,
     result.hysteresis_forward_Vg = NANUM;
     result.hysteresis_backward_Vg = NANUM;
     result.hysteresis_delta_Vg = NANUM;
+    result.hysteresis_delta_Vg_linear = NANUM;
 
     if (!options.showHysteresisCursor || turnIndex < FET_MIN_POINTS)
     {
-        _fet_delete_graph_object(gl, FET_HYST_CURSOR);
+        _fet_delete_graph_object(leftLayer, FET_HYST_CURSOR);
+        _fet_delete_graph_object(leftLayer, FET_HYST_SUMMARY);
         return false;
     }
 
-    double targetLog = NANUM;
-    if (!_fet_hysteresis_default_level(vy, turnIndex, targetLog))
+    double leftFrom, leftTo;
+    if (!_fet_layer_y_range(leftLayer, leftFrom, leftTo))
         return false;
+
+    double targetLog = NANUM;
+    GraphObject existingCursor = leftLayer.GraphObjects(FET_HYST_CURSOR);
+    if (existingCursor)
+        _fet_get_graph_object_y(leftLayer, FET_HYST_CURSOR, targetLog);
+    if (!_fet_valid_number(targetLog))
+        targetLog = (leftFrom + leftTo) / 2.0;
 
     double inputMin = vx[0];
     double inputMax = vx[0];
@@ -3017,23 +3028,63 @@ static bool _fet_update_hysteresis_cursor(GraphLayer& gl,
         inputMin = min(inputMin, vx[ii]);
         inputMax = max(inputMax, vx[ii]);
     }
-    _fet_add_scale_line(gl, FET_HYST_CURSOR, inputMin, targetLog,
+    _fet_add_scale_line(leftLayer, FET_HYST_CURSOR, inputMin, targetLog,
                         inputMax, targetLog, options.markerColor,
                         LINE_STYLE_SHORT_DASH, false, false, true, true);
 
-    double forwardVg, backwardVg;
-    if (!_fet_find_vg_at_log_current(vx, vy, 0, turnIndex,
-                                     targetLog, forwardVg))
-        return false;
-    if (!_fet_find_vg_at_log_current(vx, vy, turnIndex, vx.GetSize() - 1,
-                                     targetLog, backwardVg))
-        return false;
+    double forwardLogVg = NANUM, backwardLogVg = NANUM;
+    bool haveLog = _fet_find_vg_at_log_current(vx, vy, 0, turnIndex,
+                                               targetLog, forwardLogVg)
+                && _fet_find_vg_at_log_current(vx, vy, turnIndex,
+                                               vx.GetSize() - 1, targetLog,
+                                               backwardLogVg);
 
     result.hysteresis_level_logA = targetLog;
-    result.hysteresis_forward_Vg = forwardVg;
-    result.hysteresis_backward_Vg = backwardVg;
-    result.hysteresis_delta_Vg = fabs(backwardVg - forwardVg);
-    return true;
+    if (haveLog)
+    {
+        result.hysteresis_forward_Vg = forwardLogVg;
+        result.hysteresis_backward_Vg = backwardLogVg;
+        result.hysteresis_delta_Vg = fabs(backwardLogVg - forwardLogVg);
+    }
+
+    double rightFrom, rightTo;
+    if (_fet_layer_y_range(rightLayer, rightFrom, rightTo))
+    {
+        double frac = (targetLog - leftFrom) / (leftTo - leftFrom);
+        double targetLinear = rightFrom + frac * (rightTo - rightFrom);
+
+        double forwardLinearVg = NANUM, backwardLinearVg = NANUM;
+        if (_fet_find_vg_at_linear_current(vx, vy, 0, turnIndex,
+                                           targetLinear, forwardLinearVg)
+            && _fet_find_vg_at_linear_current(vx, vy, turnIndex,
+                                              vx.GetSize() - 1, targetLinear,
+                                              backwardLinearVg))
+            result.hysteresis_delta_Vg_linear =
+                fabs(backwardLinearVg - forwardLinearVg);
+    }
+
+    string dLine, dLog;
+    _fet_format_delta_v(result.hysteresis_delta_Vg_linear, dLine);
+    _fet_format_delta_v(result.hysteresis_delta_Vg, dLog);
+    string hystReport;
+    hystReport.Format("\\b([+/-])\n\\g(D)V\\-(line)\t%s\n\\g(D)V\\-(log)\t%s",
+                      dLine, dLog);
+    _fet_delete_graph_object(leftLayer, FET_HYST_SUMMARY);
+    string labelScript;
+    labelScript.Format("label -p 3 65 -n %s placeholder;", FET_HYST_SUMMARY);
+    leftLayer.LT_execute(labelScript);
+    GraphObject summaryLabel = leftLayer.GraphObjects(FET_HYST_SUMMARY);
+    if (summaryLabel)
+    {
+        summaryLabel.Text = hystReport;
+        summaryLabel.Attach = 0;
+        string tableStyle;
+        tableStyle.Format("%s.fsize=10;%s.fillcolor=color(255,255,255);%s.transparency=12;",
+                          FET_HYST_SUMMARY, FET_HYST_SUMMARY, FET_HYST_SUMMARY);
+        leftLayer.LT_execute(tableStyle);
+    }
+
+    return haveLog;
 }
 
 static void _fet_apply_ioff_cursor_override(GraphLayer& gl,
@@ -3348,7 +3399,7 @@ static bool _fet_add_preview_output(GraphLayer& gl, const XYRange& ssRange,
 
 static Worksheet _fet_summary_sheet()
 {
-    Worksheet wks = _fet_graph_data_sheet("Extracted Parameters", 33, false);
+    Worksheet wks = _fet_graph_data_sheet("Extracted Parameters", 34, false);
     if (!wks)
         return wks;
 
@@ -3358,14 +3409,15 @@ static Worksheet _fet_summary_sheet()
         "Ion/Ioff", "L", "W", "Cox", "Cox Mode", "Oxide Thickness",
         "Kappa", "Vd", "Ioff Vg", "Ion Vg", "Hyst Level logA",
         "Hyst Forward Vg", "Hyst Backward Vg", "Hyst Delta Vg",
+        "Hyst Delta Vg (linear)",
         "SS Slope", "SS Intercept", "Vth Slope", "Vth Intercept",
         "Gate Leakage", "Curve"
     };
     vector<string> units = {
         "", "", "", "", "mV/dec", "", "V", "", "S", "V",
         "cm^2/(V s)", "A", "A", "", "um", "um", "F/cm^2", "",
-        "nm", "", "V", "V", "V", "", "V", "V", "V", "dec/V",
-        "", "A/V", "A", "", ""
+        "nm", "", "V", "V", "V", "", "V", "V", "V", "V",
+        "dec/V", "", "A/V", "A", "", ""
     };
     for (int ii = 0; ii < names.GetSize(); ii++)
     {
@@ -3405,7 +3457,7 @@ static int _fet_summary_row_for_key(Worksheet& wks, LPCSTR curveKey)
     // empty even though the sheet already has rows (see above). Treat any
     // index beyond what it returns as blank too, rather than bailing out.
     StringArray sa;
-    wks.Columns(32).GetStringArray(sa);
+    wks.Columns(33).GetStringArray(sa);
 
     int firstBlank = -1;
     for (int rr = 0; rr < rows; rr++)
@@ -3427,7 +3479,7 @@ static bool _fet_write_summary_row(GraphLayer& gl, const FETOptions& options,
     if (!wks || row < 0)
         return false;
     if (wks.GetNumRows() <= row)
-        wks.SetSize(row + 1, max(wks.GetNumCols(), 33));
+        wks.SetSize(row + 1, max(wks.GetNumCols(), 34));
 
     wks.SetCell(row, 0, gl.GetPage().GetName());
     wks.SetCell(row, 1, result.source_range);
@@ -3456,12 +3508,13 @@ static bool _fet_write_summary_row(GraphLayer& gl, const FETOptions& options,
     wks.SetCell(row, 24, result.hysteresis_forward_Vg);
     wks.SetCell(row, 25, result.hysteresis_backward_Vg);
     wks.SetCell(row, 26, result.hysteresis_delta_Vg);
-    wks.SetCell(row, 27, result.ss_slope_dec_V);
-    wks.SetCell(row, 28, result.ss_intercept);
-    wks.SetCell(row, 29, result.vth_slope_A_V);
-    wks.SetCell(row, 30, result.vth_intercept_A);
-    wks.SetCell(row, 31, result.gate_warning);
-    wks.SetCell(row, 32, curveLabel);
+    wks.SetCell(row, 27, result.hysteresis_delta_Vg_linear);
+    wks.SetCell(row, 28, result.ss_slope_dec_V);
+    wks.SetCell(row, 29, result.ss_intercept);
+    wks.SetCell(row, 30, result.vth_slope_A_V);
+    wks.SetCell(row, 31, result.vth_intercept_A);
+    wks.SetCell(row, 32, result.gate_warning);
+    wks.SetCell(row, 33, curveLabel);
     wks.AutoSize();
     return true;
 }
@@ -3486,6 +3539,7 @@ static int _fet_analyze(const XYRange& input, const XYRange& ssRange,
     result.hysteresis_forward_Vg = NANUM;
     result.hysteresis_backward_Vg = NANUM;
     result.hysteresis_delta_Vg = NANUM;
+    result.hysteresis_delta_Vg_linear = NANUM;
     double effectiveCox = _fet_effective_cox(options);
     if (options.L_um <= 0 || options.W_um <= 0
         || !_fet_valid_number(effectiveCox) || effectiveCox <= 0
@@ -3646,7 +3700,10 @@ int fet_analyzer_refresh_preview()
     if (!hasBackward)
         _fet_remove_backward_range_cursors(leftLayer);
     if (!useBackward)
+    {
         _fet_delete_graph_object(leftLayer, FET_HYST_CURSOR);
+        _fet_delete_graph_object(leftLayer, FET_HYST_SUMMARY);
+    }
     _fet_write_graph_curves_data(vx, vy, turnIndex, hasBackward);
 
     GraphLayer rightLayer = graphPage && graphPage.Layers.Count() > 1
@@ -3679,9 +3736,6 @@ int fet_analyzer_refresh_preview()
         if (nErr != 0)
             return 100 + nErr;
         _fet_apply_ioff_cursor_override(leftLayer, result, false);
-        if (hasBackward && useBackward)
-            _fet_update_hysteresis_cursor(leftLayer, vx, vy, turnIndex,
-                                          dialogOptions, result);
         if (!_fet_add_graph_output(leftLayer, input, ssRange, vthRange,
                                    dialogOptions.device, result, false, true))
             return 5;
@@ -3725,6 +3779,30 @@ int fet_analyzer_refresh_preview()
         outputAdded = true;
     }
 
+    // Runs after both _fet_add_graph_output calls above so the hysteresis
+    // cursor's axis-center default reflects the final Y range -- Ion/Ioff
+    // reference lines can expand it (_fet_expand_log_axis_for_horizontal_refs),
+    // and centering against a pre-expansion range wouldn't match what the
+    // user actually sees.
+    if (hasBackward && useBackward)
+    {
+        FETResult hystResult;
+        _fet_update_hysteresis_cursor(leftLayer, rightLayer, vx, vy,
+                                      turnIndex, dialogOptions, hystResult);
+        if (dialogOptions.appendSummary && summarySheet && useForward)
+        {
+            int row = _fet_summary_row_for_key(summarySheet, forwardKey);
+            if (row >= 0 && row < summarySheet.GetNumRows())
+            {
+                summarySheet.SetCell(row, 23, hystResult.hysteresis_level_logA);
+                summarySheet.SetCell(row, 24, hystResult.hysteresis_forward_Vg);
+                summarySheet.SetCell(row, 25, hystResult.hysteresis_backward_Vg);
+                summarySheet.SetCell(row, 26, hystResult.hysteresis_delta_Vg);
+                summarySheet.SetCell(row, 27, hystResult.hysteresis_delta_Vg_linear);
+            }
+        }
+    }
+
     if (!outputAdded)
         return hasBackward ? 8 : 9;
     graphPage.Refresh();
@@ -3752,9 +3830,6 @@ static void _fet_default_dialog_options(FETDialogOptions& options)
     options.ssColor = options.logCurveColor;
     options.vthColor = options.linearCurveColor;
     options.markerColor = _fet_rgb_color(194, 65, 61);
-    options.logCurveColorPreset = 0;
-    options.linearCurveColorPreset = 0;
-    options.markerColorPreset = 0;
 }
 
 static bool _fet_get_dialog_options(FETDialogOptions& options,
@@ -3785,18 +3860,16 @@ static bool _fet_get_dialog_options(FETDialogOptions& options,
         GETN_STR(SSRange, "SS range", "lightened log-curve cursor pair")
         GETN_STR(VthRange, "gm range", "lightened linear-curve cursor pair")
     GETN_END_BRANCH(cursors)
+    // Curve/axis/marker colors used to be user-configurable here (manual
+    // color pickers plus presets). Removed by request -- colors now stay
+    // fixed at the values in _fet_default_dialog_options rather than being
+    // settable per-graph.
     GETN_BEGIN_BRANCH(graph, "Graph")
         GETN_CHECK(RefreshGraphStyle, "Apply logAbsId/Id layer formatting", options.refreshGraphStyle)
         GETN_CHECK(ShowFitLines, "Show extended SS and gm-range fit lines", options.showFitLines)
         GETN_CHECK(ShowMarkers, "Show circular Vth, Ion and gm markers", options.showMarkers)
         GETN_CHECK(ShowOnOffArrow, "Show Ion reference and movable Ioff cursor", options.showOnOffArrow)
         GETN_CHECK(ShowHysteresisCursor, "Show hysteresis opening cursor", options.showHysteresisCursor)
-        GETN_LIST(LogCurveColorPreset, "logAbsId preset", options.logCurveColorPreset, "Manual below|Indigo|Cyan|Blue|Purple")
-        GETN_COLOR(LogCurveColor, "logAbsId curve / left axis", options.logCurveColor)
-        GETN_LIST(LinearCurveColorPreset, "Id preset", options.linearCurveColorPreset, "Manual below|Amber|Rose|Gold|Green")
-        GETN_COLOR(LinearCurveColor, "Id curve / right axis", options.linearCurveColor)
-        GETN_LIST(MarkerColorPreset, "Marker/cursor preset", options.markerColorPreset, "Manual below|Red clay|Indigo|Amber|Slate")
-        GETN_COLOR(MarkerColor, "Ion/Ioff cursor and gm markers", options.markerColor)
         GETN_STR(LeftAxis, "Left Y axis", "|Id| in uA/um; scientific tick labels")
         GETN_STR(RightAxis, "Right Y axis", "Id in uA/um; starts at zero")
     GETN_END_BRANCH(graph)
@@ -3852,18 +3925,6 @@ static bool _fet_get_dialog_options(FETDialogOptions& options,
     options.showMarkers = settings.graph.ShowMarkers.nVal != 0;
     options.showOnOffArrow = settings.graph.ShowOnOffArrow.nVal != 0;
     options.showHysteresisCursor = settings.graph.ShowHysteresisCursor.nVal != 0;
-    options.logCurveColorPreset = settings.graph.LogCurveColorPreset.nVal;
-    options.linearCurveColorPreset = settings.graph.LinearCurveColorPreset.nVal;
-    options.markerColorPreset = settings.graph.MarkerColorPreset.nVal;
-    options.logCurveColor = settings.graph.LogCurveColor.nVal;
-    options.linearCurveColor = settings.graph.LinearCurveColor.nVal;
-    options.markerColor = settings.graph.MarkerColor.nVal;
-    options.logCurveColor = _fet_color_preset(0, options.logCurveColorPreset,
-                                              options.logCurveColor);
-    options.linearCurveColor = _fet_color_preset(1, options.linearCurveColorPreset,
-                                                 options.linearCurveColor);
-    options.markerColor = _fet_color_preset(2, options.markerColorPreset,
-                                            options.markerColor);
     options.annotate = settings.output.Annotate.nVal != 0;
     options.appendSummary = settings.output.AppendSummary.nVal != 0;
     return true;
