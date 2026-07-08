@@ -1,0 +1,17 @@
+SetupTitle, Synthetic Output curve (should be rejected by transfer import)
+PrimitiveTest, Multi Channel I/V Sweep
+TestParameter, Channel.IName, Id, Is, Ig
+TestParameter, Channel.VName, Vd, Vs, Vg
+TestParameter, Channel.Func, VAR1, CONST, VAR2
+DataName, Vd, Vg, Ig, Id, absId
+DataValue, 0.0, -10, -1.0E-11, 2.0E-12, 2.0E-12
+DataValue, 0.2, -10, -1.1E-11, 2.1E-12, 2.1E-12
+DataValue, 0.4, -10, -1.2E-11, 2.2E-12, 2.2E-12
+DataValue, 0.6, -10, -1.3E-11, 2.3E-12, 2.3E-12
+DataValue, 0.8, -10, -1.4E-11, 2.4E-12, 2.4E-12
+DataName, Vd, Vg, Ig, Id, absId
+DataValue, 0.0, 0, -1.0E-11, 5.0E-12, 5.0E-12
+DataValue, 0.2, 0, -1.1E-11, 5.1E-12, 5.1E-12
+DataValue, 0.4, 0, -1.2E-11, 5.2E-12, 5.2E-12
+DataValue, 0.6, 0, -1.3E-11, 5.3E-12, 5.3E-12
+DataValue, 0.8, 0, -1.4E-11, 5.4E-12, 5.4E-12

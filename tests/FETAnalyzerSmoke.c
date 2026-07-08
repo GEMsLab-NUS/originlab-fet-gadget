@@ -104,6 +104,10 @@ string g_fet_smoke_csv_path;
 string g_fet_smoke_table_csv_path;
 string g_fet_smoke_double_csv_path;
 string g_fet_smoke_split_csv_path;
+string g_fet_smoke_output_csv_path;
+string g_fet_smoke_generic_csv_path;
+string g_fet_smoke_metadata_guard_csv_path;
+string g_fet_smoke_xaxisname_output_csv_path;
 string g_fet_smoke_actual_csv_path_1;
 string g_fet_smoke_actual_csv_path_2;
 string g_fet_smoke_actual_csv_path_3;
@@ -152,6 +156,21 @@ int fet_analyzer_runtime_smoke()
         g_fet_smoke_double_csv_path = smokeDoubleCsvPath;
     if (strlen(smokeSplitCsvPath) > 0)
         g_fet_smoke_split_csv_path = smokeSplitCsvPath;
+    char smokeOutputCsvPath[4096], smokeGenericCsvPath[4096];
+    LT_get_str("__FET_SMOKE_OUTPUT_CSV$", smokeOutputCsvPath, 4096);
+    LT_get_str("__FET_SMOKE_GENERIC_CSV$", smokeGenericCsvPath, 4096);
+    if (strlen(smokeOutputCsvPath) > 0)
+        g_fet_smoke_output_csv_path = smokeOutputCsvPath;
+    if (strlen(smokeGenericCsvPath) > 0)
+        g_fet_smoke_generic_csv_path = smokeGenericCsvPath;
+    char smokeMetadataGuardCsvPath[4096];
+    LT_get_str("__FET_SMOKE_METADATA_GUARD_CSV$", smokeMetadataGuardCsvPath, 4096);
+    if (strlen(smokeMetadataGuardCsvPath) > 0)
+        g_fet_smoke_metadata_guard_csv_path = smokeMetadataGuardCsvPath;
+    char smokeXAxisNameOutputCsvPath[4096];
+    LT_get_str("__FET_SMOKE_XAXISNAME_OUTPUT_CSV$", smokeXAxisNameOutputCsvPath, 4096);
+    if (strlen(smokeXAxisNameOutputCsvPath) > 0)
+        g_fet_smoke_xaxisname_output_csv_path = smokeXAxisNameOutputCsvPath;
 
     char actualCsvPath1[4096], actualCsvPath2[4096], actualCsvPath3[4096];
     LT_get_str("__FET_ACTUAL_CSV_1$", actualCsvPath1, 4096);
@@ -373,6 +392,94 @@ int fet_analyzer_runtime_smoke()
         int tableLogErr = _fet_smoke_check_log_curve(tableImportedLayer, tableImportedRightLayer, 0, 0);
         if (tableLogErr != 0)
             return 440 + tableLogErr;
+    }
+    if (!g_fet_smoke_output_csv_path.IsEmpty())
+    {
+        FILE* fpOutput = fopen(g_fet_smoke_output_csv_path, "r");
+        if (!fpOutput)
+            return 559;
+        fclose(fpOutput);
+
+        // An Output/Id-Vd curve (Vg held CONST/VAR2, Vd swept as VAR1) must
+        // be recognized as not a transfer curve and rejected, not silently
+        // imported as if Vg were the swept axis.
+        Tree outputImportResult;
+        int outputImportErr = fet_import_transfer_csv_files(g_fet_smoke_output_csv_path,
+                                                             outputImportResult, false);
+        if (outputImportErr == 0 || outputImportResult.Curves.nVal != 0)
+            return 560;
+    }
+    if (!g_fet_smoke_generic_csv_path.IsEmpty())
+    {
+        FILE* fpGeneric = fopen(g_fet_smoke_generic_csv_path, "r");
+        if (!fpGeneric)
+            return 569;
+        fclose(fpGeneric);
+
+        // A transfer curve whose current column keeps a generic per-channel
+        // name (e.g. "I1" instead of "Id") must still import via the
+        // fallback current-column match, since Vg is confirmed VAR1.
+        Tree genericImportResult;
+        int genericImportErr = fet_import_transfer_csv_files(g_fet_smoke_generic_csv_path,
+                                                              genericImportResult, false);
+        if (genericImportErr != 0)
+            return 570 + genericImportErr;
+        if (genericImportResult.Curves.nVal != 1)
+            return 576;
+    }
+    if (!g_fet_smoke_metadata_guard_csv_path.IsEmpty())
+    {
+        FILE* fpGuard = fopen(g_fet_smoke_metadata_guard_csv_path, "r");
+        if (!fpGuard)
+            return 579;
+        fclose(fpGuard);
+
+        // Regression guard: a "Output.List.Data,Vg,Id,Ig,Is,Vg"-style
+        // metadata line (present in the vast majority of real B1500
+        // exports) names the same Vg/Id columns as the real data header,
+        // just at different, prefix-shifted positions. If it were ever
+        // accepted as the header, every column downstream would be
+        // misread -- exactly the bug a user hit. This must produce exactly
+        // one curve with correctly-mapped columns, not a spurious extra
+        // block from the decoy line.
+        Tree guardImportResult;
+        int guardImportErr = fet_import_transfer_csv_files(g_fet_smoke_metadata_guard_csv_path,
+                                                            guardImportResult, false);
+        if (guardImportErr != 0)
+            return 580 + guardImportErr;
+        if (guardImportResult.Curves.nVal != 1)
+            return 586;
+
+        WorksheetPage guardWp(guardImportResult.Workbook.strVal);
+        if (!guardWp)
+            return 587;
+        Worksheet guardWks;
+        guardWks = guardWp.Layers("Curves");
+        if (!guardWks || guardWks.GetNumRows() < 7)
+            return 588;
+        if (fabs(guardWks.Cell(0, 0) - (-2)) > 1e-9
+            || fabs(guardWks.Cell(0, 1) - (-1.3E-13)) > 1e-20
+            || fabs(guardWks.Cell(0, 2) - (-3.5E-13)) > 1e-20
+            || fabs(guardWks.Cell(0, 3) - 1.3E-13) > 1e-20
+            || fabs(guardWks.Cell(0, 4) - 0.1) > 1e-9)
+            return 589;
+    }
+    if (!g_fet_smoke_xaxisname_output_csv_path.IsEmpty())
+    {
+        FILE* fpXAxis = fopen(g_fet_smoke_xaxisname_output_csv_path, "r");
+        if (!fpXAxis)
+            return 591;
+        fclose(fpXAxis);
+
+        // Built-in "ApplicationTest" exports (Trans., DaulPolarOutput, ...)
+        // carry no Channel.VName/Channel.Func at all -- the swept-axis
+        // signal there is "AnalysisSetup, ...XAxis.Name, Vd/Vg" instead.
+        // An Output curve recorded this way must still be rejected.
+        Tree xAxisImportResult;
+        int xAxisImportErr = fet_import_transfer_csv_files(g_fet_smoke_xaxisname_output_csv_path,
+                                                            xAxisImportResult, false);
+        if (xAxisImportErr == 0 || xAxisImportResult.Curves.nVal != 0)
+            return 592;
     }
     if (!g_fet_smoke_double_csv_path.IsEmpty())
     {

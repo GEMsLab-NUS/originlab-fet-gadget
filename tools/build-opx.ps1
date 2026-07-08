@@ -12,6 +12,10 @@ $smokeCsv = Join-Path $root 'origin-app\FET Analyzer\examples\FET_transfer_instr
 $smokeTableCsv = Join-Path $root 'origin-app\FET Analyzer\examples\FET_transfer_sample.csv'
 $smokeDoubleCsv = Join-Path $root 'origin-app\FET Analyzer\examples\FET_transfer_double_scan.csv'
 $smokeSplitCsv = Join-Path $root 'origin-app\FET Analyzer\examples\FET_transfer_split_scan.csv'
+$smokeOutputCsv = Join-Path $root 'origin-app\FET Analyzer\examples\FET_output_curve_rejected.csv'
+$smokeGenericCsv = Join-Path $root 'origin-app\FET Analyzer\examples\FET_transfer_generic_current.csv'
+$smokeMetadataGuardCsv = Join-Path $root 'origin-app\FET Analyzer\examples\FET_transfer_metadata_prefix_guard.csv'
+$smokeXAxisNameOutputCsv = Join-Path $root 'origin-app\FET Analyzer\examples\FET_output_curve_xaxisname_rejected.csv'
 $actualCsvs = @(
     'C:\Users\NUS MSE\Desktop\Transfer curve 1V.csv',
     'C:\Users\NUS MSE\Desktop\Transfer curve 1V-2.csv',
@@ -51,6 +55,10 @@ try {
         $origin.LTStr('__FET_SMOKE_TABLE_CSV$') = $smokeTableCsv
         $origin.LTStr('__FET_SMOKE_DOUBLE_CSV$') = $smokeDoubleCsv
         $origin.LTStr('__FET_SMOKE_SPLIT_CSV$') = $smokeSplitCsv
+        $origin.LTStr('__FET_SMOKE_OUTPUT_CSV$') = $smokeOutputCsv
+        $origin.LTStr('__FET_SMOKE_GENERIC_CSV$') = $smokeGenericCsv
+        $origin.LTStr('__FET_SMOKE_METADATA_GUARD_CSV$') = $smokeMetadataGuardCsv
+        $origin.LTStr('__FET_SMOKE_XAXISNAME_OUTPUT_CSV$') = $smokeXAxisNameOutputCsv
         if (($actualCsvs | Where-Object { -not (Test-Path -LiteralPath $_) }).Count -eq 0) {
             for ($i = 0; $i -lt $actualCsvs.Count; $i++) {
                 $origin.LTStr('__FET_ACTUAL_CSV_{0}$' -f ($i + 1)) = $actualCsvs[$i]

@@ -1,0 +1,9 @@
+SetupTitle, Synthetic ApplicationTest Output curve (XAxis.Name-based rejection)
+ApplicationTest, SyntheticOutput, Public
+AnalysisSetup, Analysis.Setup.Vector.Graph.XAxis.Name, Vd
+DataName, Vd, Vg, Ig, Id
+DataValue, 0.0, -10, -1.0E-11, 2.0E-12
+DataValue, 0.2, -10, -1.1E-11, 2.1E-12
+DataValue, 0.4, -10, -1.2E-11, 2.2E-12
+DataValue, 0.6, -10, -1.3E-11, 2.3E-12
+DataValue, 0.8, -10, -1.4E-11, 2.4E-12

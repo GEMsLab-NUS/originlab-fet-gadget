@@ -27,6 +27,26 @@ App Gallery
 ## Responsibilities
 
 - Origin C parses CSV files, creates worksheets, creates graphs, computes parameters, and writes output.
+- CSV column matching accepts several instrument naming styles for Vg/Vd/Ig/Id
+  (verbose names, SPICE-style `Vgs`/`Ids`, and a last-resort match onto a
+  leftover `I*`-named current column when no alias matches). Before accepting
+  a block as a transfer curve, the importer also checks the B1500
+  `Channel.VName`/`Channel.Func` metadata (when present): if Vg is confirmed
+  held CONST or used as the secondary VAR2 sweep rather than the primary
+  VAR1 sweep, the block is an Output/Id-Vd curve and is skipped rather than
+  misread as a transfer curve. Built-in "ApplicationTest" exports (e.g.
+  `Trans.`, `DaulPolarOutput`) carry no `Channel.VName`/`Channel.Func` at
+  all; for those the same check falls back to
+  `AnalysisSetup, ...XAxis.Name`, the swept-axis name the instrument
+  recorded for its own graph. Files with neither signal import unfiltered
+  as before.
+- Header-row detection for the no-`DataName` ("Classic") layout rejects any
+  candidate line that has a namespaced (dotted, e.g. `Output.List.Data`)
+  token before its first recognized Vg/Id column. Real B1500 exports almost
+  always carry an `Output.List.Data,Vg,Id,Ig,...`-style metadata line naming
+  the same columns as the real header, just at different positions; without
+  this guard that decoy line gets accepted as the header and every
+  downstream column is misread against the wrong index.
 - LabTalk is used for App launch, graph-object cursor glue, graph formatting, and graph-object button scripting.
 - Graph cursors are free movable line objects, not Data Selector ranges. They do not snap to data points and are used only to mark X bounds.
 

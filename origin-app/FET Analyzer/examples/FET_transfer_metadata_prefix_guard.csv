@@ -1,0 +1,16 @@
+Setup title,Synthetic ID/VG with a decoy Output.List.Data metadata line
+Classic test name,"I/V Sweep"
+Channel.IName,Id,Is,Ig
+Channel.VName,Vd,Vs,Vg
+Channel.Func,CONST,CONST,VAR1
+Output.Graph.XAxis.Data,Vg
+Output.List.Data,Vg,Id,Ig,Is,Vg
+Output.Scalar.Data,Vd
+Vg,absId,absIg,absIs,Id,Ig,Is,Vd
+-2,1.3E-13,3.5E-13,7.5E-13,-1.3E-13,-3.5E-13,-7.5E-13,0.1
+-1.975,2.6E-13,6.6E-13,5E-13,-2.6E-13,-6.6E-13,-5E-13,0.1
+-1.95,3.3E-13,6E-14,6.6E-13,-3.3E-13,-6E-14,-6.6E-13,0.1
+0,7.5709E-09,7.4E-13,7.597E-09,7.5709E-09,-7.4E-13,-7.597E-09,0.1
+1,8.3702E-07,2.5E-13,8.3562E-07,8.3702E-07,2.5E-13,-8.3562E-07,0.1
+2,2.0275E-06,4.6E-13,2.0284E-06,2.0275E-06,4.6E-13,-2.0284E-06,0.1
+3,3.0778E-06,2.4E-13,3.0763E-06,3.0778E-06,2.4E-13,-3.0763E-06,0.1

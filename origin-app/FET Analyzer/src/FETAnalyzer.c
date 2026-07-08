@@ -9,7 +9,7 @@
 #include <xfutils.h>
 #include <sys_utils.h>
 
-#define FET_APP_TITLE "FET Gadget v0.7.2"
+#define FET_APP_TITLE "FET Gadget v0.7.3"
 #define FET_MIN_POINTS 3
 #define FET_IMPORT_COLS_PER_CURVE 6
 #define FET_LAUNCH_IMPORT_CSV 1
@@ -408,7 +408,7 @@ static int _fet_find_vg_column(const vector<string>& names, int startIndex = 0)
     vector<string> aliases = {
         "Vg", "Vg_V", "VG", "GateV", "Gate_V", "GateVoltage", "Gate Voltage",
         "Vgate", "Vgate_V", "Gate Voltage (V)", "Gate Voltage[V]",
-        "Vg (V)", "Vg[V]", "SMU4 V", "SMU4 Voltage"
+        "Vg (V)", "Vg[V]", "SMU4 V", "SMU4 Voltage", "Vgs", "VGS", "vgs"
     };
     return _fet_find_any_column(names, aliases, startIndex);
 }
@@ -418,7 +418,8 @@ static int _fet_find_vd_column(const vector<string>& names, int startIndex = 0)
     vector<string> aliases = {
         "Vd", "Vd_V", "VD", "DrainV", "Drain_V", "DrainVoltage",
         "Drain Voltage", "Vdrain", "Vdrain_V", "Drain Voltage (V)",
-        "Drain Voltage[V]", "Vd (V)", "Vd[V]", "SMU2 V", "SMU2 Voltage"
+        "Drain Voltage[V]", "Vd (V)", "Vd[V]", "SMU2 V", "SMU2 Voltage",
+        "Vds", "VDS", "vds"
     };
     return _fet_find_any_column(names, aliases, startIndex);
 }
@@ -428,7 +429,8 @@ static int _fet_find_ig_column(const vector<string>& names, int startIndex = 0)
     vector<string> aliases = {
         "Ig", "Ig_A", "IG", "GateI", "Gate_I", "GateCurrent",
         "Gate Current", "Igate", "Igate_A", "Gate Current (A)",
-        "Gate Current[A]", "Ig (A)", "Ig[A]", "SMU4 I", "SMU4 Current"
+        "Gate Current[A]", "Ig (A)", "Ig[A]", "SMU4 I", "SMU4 Current",
+        "Igs", "IGS", "igs"
     };
     return _fet_find_any_column(names, aliases, startIndex);
 }
@@ -438,9 +440,37 @@ static int _fet_find_id_column(const vector<string>& names, int startIndex = 0)
     vector<string> aliases = {
         "Id", "Id_A", "ID", "DrainI", "Drain_I", "DrainCurrent",
         "Drain Current", "Idrain", "Idrain_A", "Drain Current (A)",
-        "Drain Current[A]", "Id (A)", "Id[A]", "SMU2 I", "SMU2 Current"
+        "Drain Current[A]", "Id (A)", "Id[A]", "SMU2 I", "SMU2 Current",
+        "Ids", "IDS", "ids"
     };
     return _fet_find_any_column(names, aliases, startIndex);
+}
+
+// Some exports leave the drain-current column with a generic per-channel
+// name (e.g. "I1") instead of "Id"/"Ids". Once Vg (and, when present, Vd/Ig)
+// are identified, treat the first remaining current-like column ("I...",
+// but not the source-current "Is") as Id rather than failing the import.
+static int _fet_find_fallback_id_column(const vector<string>& names,
+                                        int idxVg, int idxVd, int idxIg,
+                                        int startIndex = 0)
+{
+    for (int ii = startIndex; ii < names.GetSize(); ii++)
+    {
+        if (ii == idxVg || ii == idxVd || ii == idxIg)
+            continue;
+        string token(names[ii]);
+        _fet_trim_string(token);
+        if (token.IsEmpty())
+            continue;
+        if (token.CompareNoCase("Is") == 0 || token.CompareNoCase("Is_A") == 0
+            || token.CompareNoCase("Source Current") == 0)
+            continue;
+        char c = token.GetAt(0);
+        if (c != 'I' && c != 'i')
+            continue;
+        return ii;
+    }
+    return -1;
 }
 
 static int _fet_find_absid_column(const vector<string>& names, int startIndex = 0)
@@ -450,6 +480,26 @@ static int _fet_find_absid_column(const vector<string>& names, int startIndex = 
         "|Id|", "absDrainCurrent", "abs(Id) (A)", "absId (A)", "absId[A]"
     };
     return _fet_find_any_column(names, aliases, startIndex);
+}
+
+// B1500 metadata lines like "Output.List.Data,Vg,Id,Ig" or
+// "TestParameter, Output.List.Data, Vg, absId, Id, Ig, Vd" name the very
+// same Vg/Id columns the real data header does, just prefixed by one or two
+// namespaced ("Foo.Bar") descriptive keys. If such a line were accepted as
+// the data header, every subsequent column index would be off by the prefix
+// width, silently misreading every value (this is what a user saw: a real
+// column mismatch, not a missing-alias problem). A genuine data header
+// never has a dotted key token before its first recognized channel column,
+// so reject any candidate whose tokens up to that point contain a ".".
+static bool _fet_header_prefix_looks_like_metadata(const vector<string>& tokens,
+                                                    int firstMatchedIndex)
+{
+    for (int ii = 0; ii < firstMatchedIndex && ii < tokens.GetSize(); ii++)
+    {
+        if (tokens[ii].Find(".") >= 0)
+            return true;
+    }
+    return false;
 }
 
 static int _fet_find_directional_column(const vector<string>& names,
@@ -502,6 +552,85 @@ static int _fet_find_directional_absid_column(const vector<string>& names,
     return _fet_find_directional_column(names, direction, aliases, startIndex);
 }
 
+// B1500 exports record which channel is the primary swept variable in
+// "Channel.VName"/"Channel.Func" metadata lines (as either
+// "TestParameter, Channel.VName, Vg, Vd, Vs" or the "Classic" layout's bare
+// "Channel.VName,Vd,Vs,Vg"). Capture whichever of the two tags a meta line
+// carries so a later block can check whether Vg is really VAR1 (a transfer
+// curve) rather than a CONST/VAR2 bias column of an Output (Id-Vd) curve
+// that merely happens to also report Vg.
+static bool _fet_capture_channel_role_line(const vector<string>& tokens,
+                                           LPCSTR key, vector<string>& outValues)
+{
+    int keyIndex = -1;
+    if (tokens.GetSize() > 0 && tokens[0].CompareNoCase(key) == 0)
+        keyIndex = 0;
+    else if (tokens.GetSize() > 1 && tokens[1].CompareNoCase(key) == 0)
+        keyIndex = 1;
+    if (keyIndex < 0)
+        return false;
+
+    outValues.SetSize(0);
+    for (int ii = keyIndex + 1; ii < tokens.GetSize(); ii++)
+    {
+        string value(tokens[ii]);
+        _fet_trim_string(value);
+        outValues.Add(value);
+    }
+    return true;
+}
+
+// Built-in Keysight "ApplicationTest" exports (e.g. "Trans.", "DaulPolarOutput")
+// don't carry Channel.VName/Channel.Func at all -- instead they record the
+// graphed sweep axis as "AnalysisSetup, Analysis.Setup.Vector.Graph.XAxis.Name, Vg"
+// (or "...Name, Vd" for an Output curve). Capture that single value the same
+// way, as a second, independent signal for _fet_vg_sweep_status.
+static bool _fet_capture_single_value_line(const vector<string>& tokens,
+                                           LPCSTR key, string& outValue)
+{
+    int keyIndex = -1;
+    if (tokens.GetSize() > 0 && tokens[0].CompareNoCase(key) == 0)
+        keyIndex = 0;
+    else if (tokens.GetSize() > 1 && tokens[1].CompareNoCase(key) == 0)
+        keyIndex = 1;
+    if (keyIndex < 0 || keyIndex + 1 >= tokens.GetSize())
+        return false;
+    outValue = tokens[keyIndex + 1];
+    _fet_trim_string(outValue);
+    return true;
+}
+
+// Returns 1 if Vg is confirmed as the primary swept channel -- a transfer
+// curve; 0 if Vg is confirmed present but is not the swept channel -- an
+// Output/Id-Vd curve, not a transfer curve; or -1 if neither role signal
+// could be read, in which case callers should not filter and should fall
+// back to the old "any recognized Vg/Id columns" behavior. Prefers
+// Channel.VName/Channel.Func (VAR1 check); falls back to the
+// ApplicationTest XAxis.Name when that metadata isn't present.
+static int _fet_vg_sweep_status(const vector<string>& channelVNames,
+                                const vector<string>& channelFuncs,
+                                const string& xAxisName)
+{
+    if (channelVNames.GetSize() > 0
+        && channelVNames.GetSize() == channelFuncs.GetSize())
+    {
+        int idx = _fet_find_vg_column(channelVNames, 0);
+        if (idx >= 0)
+        {
+            string func(channelFuncs[idx]);
+            _fet_trim_string(func);
+            return func.CompareNoCase("VAR1") == 0 ? 1 : 0;
+        }
+    }
+    if (!xAxisName.IsEmpty())
+    {
+        vector<string> single;
+        single.Add(xAxisName);
+        return _fet_find_vg_column(single, 0) >= 0 ? 1 : 0;
+    }
+    return -1;
+}
+
 static void _fet_import_error_text(int code, string& text)
 {
     if (code == 0)
@@ -510,6 +639,9 @@ static void _fet_import_error_text(int code, string& text)
         text = "file could not be opened";
     else if (code == -2)
         text = "DataName/header row did not contain recognized Vg and Id columns";
+    else if (code == -3)
+        text = "Vg is not the swept variable (this looks like an Output/Id-Vd "
+               "curve, not a transfer curve) -- skipped";
     else
         text.Format("error %d", code);
 }
@@ -1339,6 +1471,10 @@ static int _fet_import_one_csv(FETImportContext& ctx, LPCSTR filePath)
     bool splitScanColumns = false;
     vector vVg, vVd, vIg, vId, vAbsId;
     vector vBwdVg, vBwdVd, vBwdIg, vBwdId, vBwdAbsId;
+    vector<string> channelVNames, channelFuncs;
+    string xAxisName;
+    bool blockIsTransfer = true;
+    bool anyRoleRejected = false;
 
     for (int ll = 0; ll < lines.GetSize(); ll++)
     {
@@ -1352,10 +1488,11 @@ static int _fet_import_one_csv(FETImportContext& ctx, LPCSTR filePath)
         {
             if (inData)
             {
-                _fet_flush_import_scan_block(ctx, filePath, blockIndex,
-                                             vVg, vVd, vIg, vId, vAbsId,
-                                             vBwdVg, vBwdVd, vBwdIg,
-                                             vBwdId, vBwdAbsId);
+                if (blockIsTransfer)
+                    _fet_flush_import_scan_block(ctx, filePath, blockIndex,
+                                                 vVg, vVd, vIg, vId, vAbsId,
+                                                 vBwdVg, vBwdVd, vBwdIg,
+                                                 vBwdId, vBwdAbsId);
                 vVg.SetSize(0); vVd.SetSize(0); vIg.SetSize(0);
                 vId.SetSize(0); vAbsId.SetSize(0);
                 vBwdVg.SetSize(0); vBwdVd.SetSize(0); vBwdIg.SetSize(0);
@@ -1376,6 +1513,8 @@ static int _fet_import_one_csv(FETImportContext& ctx, LPCSTR filePath)
             idxIg = _fet_find_ig_column(names, 1);
             idxId = _fet_find_id_column(names, 1);
             idxAbsId = _fet_find_absid_column(names, 1);
+            if (idxId < 0 && idxVg >= 0)
+                idxId = _fet_find_fallback_id_column(names, idxVg, idxVd, idxIg, 1);
             if (splitScanColumns)
             {
                 idxVg = idxFwdVg;
@@ -1386,6 +1525,10 @@ static int _fet_import_one_csv(FETImportContext& ctx, LPCSTR filePath)
             {
                 return -2;
             }
+            int vgSweep = _fet_vg_sweep_status(channelVNames, channelFuncs, xAxisName);
+            blockIsTransfer = (vgSweep != 0);
+            if (!blockIsTransfer)
+                anyRoleRejected = true;
             blockIndex++;
             inData = true;
             requireDataValue = true;
@@ -1396,6 +1539,17 @@ static int _fet_import_one_csv(FETImportContext& ctx, LPCSTR filePath)
         {
             vector<string> headerTokens;
             _fet_split_csv_line(line, headerTokens);
+
+            vector<string> roleCapture;
+            if (_fet_capture_channel_role_line(headerTokens, "Channel.VName", roleCapture))
+                channelVNames = roleCapture;
+            if (_fet_capture_channel_role_line(headerTokens, "Channel.Func", roleCapture))
+                channelFuncs = roleCapture;
+            string xAxisCapture;
+            if (_fet_capture_single_value_line(headerTokens,
+                    "Analysis.Setup.Vector.Graph.XAxis.Name", xAxisCapture))
+                xAxisName = xAxisCapture;
+
             int idxFwdVg = _fet_find_directional_vg_column(headerTokens, "Forward");
             int idxFwdId = _fet_find_directional_id_column(headerTokens, "Forward");
             idxBwdVg = _fet_find_directional_vg_column(headerTokens, "Backward");
@@ -1408,14 +1562,26 @@ static int _fet_import_one_csv(FETImportContext& ctx, LPCSTR filePath)
             idxIg = _fet_find_ig_column(headerTokens);
             idxId = _fet_find_id_column(headerTokens);
             idxAbsId = _fet_find_absid_column(headerTokens);
+            if (idxId < 0 && idxVg >= 0)
+                idxId = _fet_find_fallback_id_column(headerTokens, idxVg, idxVd, idxIg);
             if (splitScanColumns)
             {
                 idxVg = idxFwdVg;
                 idxId = idxFwdId;
                 idxAbsId = _fet_find_directional_absid_column(headerTokens, "Forward");
             }
-            if (idxVg >= 0 && idxId >= 0)
+            int firstMatchedIndex = idxVg;
+            if (idxId >= 0 && (firstMatchedIndex < 0 || idxId < firstMatchedIndex))
+                firstMatchedIndex = idxId;
+            bool looksLikeMetadataLine = firstMatchedIndex >= 0
+                && _fet_header_prefix_looks_like_metadata(headerTokens, firstMatchedIndex);
+
+            if (idxVg >= 0 && idxId >= 0 && !looksLikeMetadataLine)
             {
+                int vgSweep = _fet_vg_sweep_status(channelVNames, channelFuncs, xAxisName);
+                blockIsTransfer = (vgSweep != 0);
+                if (!blockIsTransfer)
+                    anyRoleRejected = true;
                 blockIndex++;
                 inData = true;
                 requireDataValue = false;
@@ -1426,7 +1592,8 @@ static int _fet_import_one_csv(FETImportContext& ctx, LPCSTR filePath)
             continue;
         }
 
-        if (!requireDataValue || _fet_starts_with_token(line, "DataValue"))
+        if (blockIsTransfer
+            && (!requireDataValue || _fet_starts_with_token(line, "DataValue")))
         {
             vector<string> tokens;
             _fet_split_csv_line(line, tokens);
@@ -1483,12 +1650,16 @@ static int _fet_import_one_csv(FETImportContext& ctx, LPCSTR filePath)
         }
     }
 
-    if (inData)
+    if (inData && blockIsTransfer)
         _fet_flush_import_scan_block(ctx, filePath, blockIndex,
                                      vVg, vVd, vIg, vId, vAbsId,
                                      vBwdVg, vBwdVd, vBwdIg,
                                      vBwdId, vBwdAbsId);
-    return ctx.curveCount - curvesBefore;
+
+    int producedCount = ctx.curveCount - curvesBefore;
+    if (producedCount <= 0 && anyRoleRejected)
+        return -3;
+    return producedCount;
 }
 
 int fet_import_transfer_csv_files(LPCSTR lpcszFiles, TreeNode& resultTree,

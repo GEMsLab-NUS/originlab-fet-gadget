@@ -1,0 +1,16 @@
+SetupTitle, Synthetic transfer curve with a generic per-channel current name
+PrimitiveTest, I/V List Sweep
+Channel.IName,Ig,I1,Is
+Channel.VName,Vg,V1,Vs
+Channel.Mode,V,V,COMMON
+Channel.Func,VAR1,CONST,CONST
+Vg,I1
+-2.0,1.0E-12
+-1.5,1.8E-12
+-1.0,3.2E-12
+-0.5,5.6E-12
+0.0,1.0E-11
+0.5,1.0E-9
+1.0,1.0E-7
+1.5,1.0E-6
+2.0,3.0E-6
