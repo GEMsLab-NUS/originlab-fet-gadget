@@ -21,7 +21,7 @@ if ($missing.Count -gt 0) {
 
 $packageIni = Join-Path $app 'package.ini'
 $ini = Get-Content -LiteralPath $packageIni -Raw
-foreach ($needle in @('Name=FET Gadget', 'Version=0.6', 'LaunchScript=launch.ogs', 'Always=1', 'Graph=1', 'Workbook=1')) {
+foreach ($needle in @('Name=FET Gadget', 'Version=0.7.1', 'LaunchScript=launch.ogs', 'Always=1', 'Graph=1', 'Workbook=1')) {
     if (-not $ini.Contains($needle)) {
         throw "package.ini does not contain '$needle'"
     }
@@ -43,7 +43,7 @@ if (-not $source.Contains('[CSV Files (*.csv)] *.csv')) {
 if (-not $source.Contains('fet_analyzer_get_launch_mode()') -or -not $source.Contains('fet_analyzer_import_csv()')) {
     throw 'App entry point does not route graph and non-graph launches'
 }
-if (-not $source.Contains('FET Gadget v0.6')) {
+if (-not $source.Contains('FET Gadget v0.7.1')) {
     throw 'Origin C dialog title does not expose the current app version'
 }
 if (-not $source.Contains('FET_CURSOR_SS_START') -or -not $source.Contains('FET_CURSOR_VTH_START')) {
@@ -61,7 +61,7 @@ if (-not $source.Contains('fet_analyzer_show_settings') -or -not $source.Contain
 foreach ($needle in @(
     'label -r legend',
     'FET Gadget',
-    'label -p 88 12 -j 1 -n FET_CONFIG',
+    'label -p 88 97 -j 1 -n FET_CONFIG',
     '.background=0;',
     '_fet_add_horizontal_cursor_line',
     '_fet_plot_has_backward_scan',
@@ -80,7 +80,7 @@ foreach ($needle in @(
     'layer.width=76;layer.height=76',
     '_fet_remove_backward_range_cursors',
     'LINE_STYLE_SHORT_DASH',
-    'line.compound',
+    'FET_BACKWARD_LINE_WIDTH',
     '.VMOVE=1;',
     '_fet_add_segmented_visible_plots',
     '_fet_add_hidden_source_plot',

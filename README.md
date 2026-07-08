@@ -1,72 +1,68 @@
-# FET Gadget (FET Analyzer) for Origin
+# FET Gadget for Origin
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Origin](https://img.shields.io/badge/Origin-10.3%2B-blue.svg)](#环境要求)
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
+  <a href="#requirements"><img alt="Origin" src="https://img.shields.io/badge/Origin-10.3%2B-blue.svg"></a>
+  <a href="../../releases"><img alt="Release" src="https://img.shields.io/badge/release-latest-brightgreen.svg"></a>
+  <a href="docs/architecture.md"><img alt="Origin C" src="https://img.shields.io/badge/built%20with-Origin%20C-informational.svg"></a>
+</p>
 
-面向 Origin/OriginPro 的交互式 FET（场效应晶体管）transfer curve 分析 App。导入 CSV 原始数据，
-在图上用可拖动的 range cursor 圈定拟合区间，一键提取 SS、Vth、gm、迁移率、Ion/Ioff 等参数，并把
-结果整理进结果表，支持正向/反向双扫描（forward/backward）分别提取和累计多条曲线的结果。
+<p align="center"><b>English</b> | <a href="README.zh-CN.md">简体中文</a></p>
 
-App 内部名称为 **FET Gadget**（`package.ini` / OPX 文件名 / Origin Apps 目录下的文件夹名都是
-`FET Gadget`），仓库目录沿用了早期的 `FET Analyzer` 命名，两者指同一个 App。
+An interactive FET (field-effect transistor) transfer-curve analysis App for Origin/OriginPro.
+Import raw CSVs, drag range cursors on the graph to bracket the fit windows, and extract SS, Vth,
+gm, mobility, and Ion/Ioff with one click — forward and backward sweeps are detected and extracted
+separately, and results from every curve you analyze accumulate in one results table.
 
-## 目录
+The App's internal identity is **FET Gadget** (that's the name in `package.ini`, the OPX filename,
+and the folder Origin installs it under); the repository folder is still named `FET Analyzer` from
+an earlier iteration — both names refer to the same App.
 
-- [功能](#功能)
-- [环境要求](#环境要求)
-- [安装](#安装)
-  - [方式一：安装已构建的 OPX（推荐给使用者）](#方式一安装已构建的-opx推荐给使用者)
-  - [方式二：从源码构建（推荐给开发者）](#方式二从源码构建推荐给开发者)
-- [使用方法](#使用方法)
-  - [1. 导入数据](#1-导入数据)
-  - [2. 选中曲线并放置 cursor](#2-选中曲线并放置-cursor)
-  - [3. 调整拟合区间](#3-调整拟合区间)
-  - [4. 查看结果](#4-查看结果)
-  - [5. 配置项（Settings）](#5-配置项settings)
-  - [支持的 CSV 格式](#支持的-csv-格式)
-- [输出说明](#输出说明)
-- [项目结构](#项目结构)
-- [开发与测试](#开发与测试)
-- [已知限制 / 后续计划](#已知限制--后续计划)
+## Table of Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+  - [Option A — install a released OPX](#option-a--install-a-released-opx-recommended-for-users)
+  - [Option B — build from source](#option-b--build-from-source-recommended-for-developers)
+- [Usage](#usage)
+- [Supported CSV formats](#supported-csv-formats)
+- [Output](#output)
+- [Project layout](#project-layout)
+- [Development](#development)
+- [Roadmap](#roadmap)
 - [License](#license)
 
-## 功能
+## Features
 
-- 导入仪器 CSV：支持单文件多段 `DataName/DataValue` 数据块，也支持普通 `Vg/Id` 表格，以及显式拆分好
-  的 `Forward Vg/Forward Id/Backward Vg/Backward Id` 列。
-- 自动识别双向扫描（forward 上扫 + backward 下扫），分别作为独立曲线处理。
-- 自动生成 workbook（`Curves`/`RawMeta`）和双 Y 轴 Id-Vg graph：左轴为 `|Id|` 对数坐标，右轴为
-  `Id` 线性坐标，两者按沟道宽度归一化显示为 `uA/um`。
-- 图上提供两组可水平拖动的自由 range cursor：
-  - 实线一对：forward（正向）SS 亚阈值拟合范围 + Vth 线性外推范围。
-  - 点划线一对：backward（反向）对应范围，与实线视觉上明确区分。
-- 计算 SS、Vth、最大 gm、场效应迁移率、Ion/Ioff、滞回（hysteresis）等参数。
-- 图中叠加 SS 拟合线、Vth 拟合/截线、gm/Vth 参考线、on/off 参考线、summary 文本框，forward/backward
-  分别标注为 `[+]`/`[-]`。
-- Ioff 参考线可拖动，松手即重新计算 Ioff 和 Ion/Ioff 并更新图和结果表。
-- 结果按"每条曲线 × 每个扫描方向"一行，写入隐藏的 `[FETGraphData]Extracted Parameters` 表：同一条
-  曲线重复分析（例如拖动 cursor 微调）会更新已有的那一行，分析不同曲线则追加新行，不会互相覆盖。
-- 图上提供 `FET Gadget` 配置按钮，可打开 Device / Extraction / Cursors / Graph / Output 分组配置
-  对话框，切换 Auto/Forward/Backward/Both 扫描模式只影响本次绘图与分析，不会清空另一侧已调好的
-  cursor 位置。
+| | |
+|---|---|
+| **Flexible import** | Instrument multi-block `DataName/DataValue` CSVs, plain `Vg/Id` tables, or CSVs with explicit `Forward Vg/Forward Id/Backward Vg/Backward Id` columns. |
+| **Automatic scan detection** | Forward (rising) and backward (falling) sweeps are detected and treated as paired curves automatically. |
+| **Dual-axis graph** | Auto-generated Id-Vg graph: left axis is `\|Id\|` on a log scale, right axis is linear `Id`, both normalized to `uA/um` by channel width. |
+| **Draggable fit windows** | Two pairs of free range cursors per direction — solid for forward, dash-dot for backward — mark the SS and Vth fit windows without snapping to data points. |
+| **One-click extraction** | SS, Vth, max gm, field-effect mobility, Ion/Ioff, and hysteresis, with fit lines, reference lines, and a summary annotation drawn directly on the graph. |
+| **Live Ioff** | Drag the Ioff reference line and Ioff / Ion-Ioff recompute immediately, on the graph and in the results table. |
+| **Non-destructive scan mode** | Switching Auto/Forward/Backward/Both in Settings hides the unused direction's curve (not deletes it) and never discards the cursor positions you already tuned. |
+| **Accumulating results** | One row per curve per direction in a hidden `Extracted Parameters` table — re-analyzing a curve updates its row in place, analyzing a different curve appends a new one. |
 
-## 环境要求
+## Requirements
 
-- **Origin 或 OriginPro 2022 及以上**（`package.ini` 中声明的最低版本为 **10.3**）。
-- Windows（Origin C / OPX 打包工具链本身是 Windows-only）。
-- 从源码构建（`tools/build-opx.ps1`）额外需要：
-  - Origin 已在本机注册为 COM Server（正常安装即会注册）。
-  - PowerShell（Windows 自带的 5.1 版本即可）。
+- **Origin or OriginPro 2022 or later** (`package.ini` declares a minimum of **10.3**).
+- Windows (the Origin C / OPX toolchain is Windows-only).
+- To build from source, additionally:
+  - Origin registered as a COM server on the machine (this happens automatically on a normal install).
+  - PowerShell (the version 5.1 that ships with Windows is enough).
 
-## 安装
+## Installation
 
-### 方式一：安装已构建的 OPX（推荐给使用者）
+### Option A — install a released OPX (recommended for users)
 
-1. 从 [Releases](../../releases) 页面下载最新的 `FET Gadget.opx`。
-2. 直接把 `.opx` 文件拖入正在运行的 Origin 窗口，按提示完成安装。
-3. 安装完成后，在 App Gallery（或 **Apps** 面板）里能看到 **FET Gadget** 图标。
+1. Download the latest `FET Gadget.opx` from [Releases](../../releases).
+2. Drag the `.opx` file onto a running Origin window and follow the install prompt.
+3. **FET Gadget** now appears in the App Gallery / Apps panel.
 
-### 方式二：从源码构建（推荐给开发者）
+### Option B — build from source (recommended for developers)
 
 ```powershell
 git clone https://github.com/GEMsLab-NUS/originlab-fet-gadget.git
@@ -74,129 +70,119 @@ cd originlab-fet-gadget
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\build-opx.ps1
 ```
 
-构建脚本会依次：
+The build script:
 
-1. 启动 Origin（通过 COM），编译 `origin-app/FET Analyzer/src/FETAnalyzer.c`。
-2. 编译并运行 `tests/FETAnalyzerSmoke.c` 的运行时 smoke test（可用 `-SkipSmoke` 跳过）。
-3. 把 `origin-app/FET Analyzer` 同步到 `%LocalAppData%\OriginLab\Apps\FET Gadget`，用 `mkOPX`
-   打包为 `build/FET Gadget.opx`。
+1. Launches Origin (via COM) and compiles `origin-app/FET Analyzer/src/FETAnalyzer.c`.
+2. Compiles and runs the runtime smoke test in `tests/FETAnalyzerSmoke.c` (skip with `-SkipSmoke`).
+3. Syncs `origin-app/FET Analyzer` into `%LocalAppData%\OriginLab\Apps\FET Gadget` and packages it
+   with `mkOPX` into `build/FET Gadget.opx`.
 
-生成的 `build/FET Gadget.opx` 可以按方式一的方法拖入任意一台安装了 Origin 的机器完成安装；构建
-过程本身也会把 App 安装/更新到本机的 Origin Apps 目录，因此本机可以直接在 Origin 里试用而不需要
-再手动拖拽安装。
+Since the build also installs/updates the App in your local Origin Apps directory, you can try it
+in Origin immediately afterward without a separate drag-and-drop install. The resulting
+`build/FET Gadget.opx` can still be copied to and installed on any other Origin machine (Option A).
 
-也可以手动开发安装（不打 OPX，直接在 Code Builder 里改）：把 `origin-app/FET Analyzer` 整个复制
-到 `%LocalAppData%\OriginLab\Apps\FET Gadget`，在 Origin 的 Code Builder 中把该文件夹加入
-workspace 即可直接调试。更完整的打包细节见 [docs/opx-packaging.md](docs/opx-packaging.md)。
+<details>
+<summary>Manual development install (debug directly in Code Builder, no OPX)</summary>
 
-## 使用方法
+Copy `origin-app/FET Analyzer` to `%LocalAppData%\OriginLab\Apps\FET Gadget`, then add that folder
+to your workspace in Origin's Code Builder to edit and debug in place. See
+[docs/opx-packaging.md](docs/opx-packaging.md) for the full packaging/release walkthrough.
 
-### 1. 导入数据
+</details>
 
-在任意 workbook 或空白窗口下启动 **FET Gadget**（App Gallery 图标或工具栏按钮），在弹出的文件选择
-框中选择一个或多个 CSV 文件。App 会为每个文件（以及文件内每个 `DataName` 数据块）创建一条曲线，
-生成一个 workbook（`Curves` + `RawMeta` 两个 sheet）和一张双 Y 轴 Id-Vg graph。
+## Usage
 
-### 2. 选中曲线并放置 cursor
+1. **Import** — launch **FET Gadget** (App Gallery icon or toolbar button) from any workbook or
+   blank window and pick one or more CSV files. The App creates one curve per file (or per
+   `DataName` block within a file), a workbook (`Curves` + `RawMeta`), and a dual-Y-axis Id-Vg
+   graph.
+2. **Select a curve** — click the right-axis `Id` curve you want to analyze to make it the active
+   plot (a graph can hold several curves; you must select one). Launch **FET Gadget** again: if
+   there are no range cursors yet, the App places one set automatically (two sets if it detects a
+   forward+backward double sweep).
+3. **Adjust the fit windows** — drag the vertical cursors: the solid pair covers the forward SS
+   subthreshold region / Vth linear turn-on segment, the dash-dot pair (if present) covers the
+   backward equivalent. Drag the orange/red Ioff reference line to set the off-state level
+   manually — it recomputes Ioff and Ion/Ioff on release. The Ion reference line is fixed.
+4. **Read the results** — launch **FET Gadget** once more to compute. The graph shows the SS/Vth
+   fit lines and a summary box (`[+]` forward, `[-]` backward). Full results are written to the
+   hidden `FETGraphData` workbook's `Extracted Parameters` sheet (one row per curve per direction,
+   accumulated across every curve you've analyzed).
+5. **Settings** — click the `FET Gadget` button on the graph to open Device / Extraction / Cursors
+   / Graph / Output settings: channel `L`/`W`, `Cox` (direct entry or by material/thickness), `Vd`,
+   smoothing window, auto fit-window sizes, minimum R², scan mode, colors, and what gets drawn.
+   Switching scan mode only changes what this pass draws/analyzes — it never deletes the other
+   direction's cursors, so switching back reuses them instantly.
 
-在 graph 中点击你要分析的那条右轴 `Id` 曲线，使其成为 active plot（一张图上可能有多条曲线，必须
-先点选）。再次启动 **FET Gadget**：如果图上还没有 range cursor，App 会根据数据自动放置一组（或两组，
-如果检测到 forward+backward 双向扫描）。
+## Supported CSV formats
 
-### 3. 调整拟合区间
+See [`origin-app/FET Analyzer/examples/`](origin-app/FET%20Analyzer/examples/) for sample files
+covering each format:
 
-拖动竖线 cursor 调整拟合范围：
-
-- 实线一对覆盖 forward 的 SS 亚阈值区域 / Vth 线性导通段。
-- 点划线一对（如果存在）覆盖 backward 对应区域。
-
-拖动图中橙色/红色的 Ioff 水平参考线可以手动指定 off-state 电流水平，松手会立即重新计算 Ioff 和
-Ion/Ioff。Ion 参考线是不可拖动的固定参考。
-
-### 4. 查看结果
-
-再次启动 **FET Gadget** 完成计算。图上会显示 SS/Vth 拟合线和参数摘要文本框（forward 标 `[+]`，
-backward 标 `[-]`）。完整结果同时写入隐藏 workbook `FETGraphData` 的 `Extracted Parameters` sheet
-（每条曲线每个方向一行，可累计多条曲线的历史结果）。
-
-### 5. 配置项（Settings）
-
-点击图上的 `FET Gadget` 按钮打开配置对话框，可调整：
-
-- **Device**：沟道长宽 `L`/`W`、栅氧电容 `Cox`（直接输入或按材料/厚度换算）、`Vd`。
-- **Extraction**：平滑窗口、SS/Vth 自动拟合窗口大小、最小 R²。
-- **Cursors**：扫描模式 Auto/Forward/Backward/Both、是否重新放置 cursor。
-- **Graph**：曲线/坐标轴配色。
-- **Output**：是否标注图、是否追加结果表、是否显示拟合线/marker。
-
-切换扫描模式只影响*这一次*要绘制和分析哪个方向，不会删除另一侧已经调好的 cursor——切回去可以立刻
-复用，不需要重新从头调整。
-
-### 支持的 CSV 格式
-
-参见 [`origin-app/FET Analyzer/examples/`](origin-app/FET%20Analyzer/examples/) 下的示例文件：
-
-| 文件 | 格式 |
+| File | Format |
 |---|---|
-| `FET_transfer_sample.csv` | 最简单的 `Vg,Id` 两列表格 |
-| `FET_transfer_double_scan.csv` | 单列 `Vg,Id`，一次连续的正扫+反扫 |
-| `FET_transfer_split_scan.csv` | 显式拆分的 `Forward Vg,Forward Id,Backward Vg,Backward Id` 四列 |
-| `FET_transfer_instrument_multicurve.csv` | 仪器导出格式：带元数据 + 多个 `DataName/DataValue` 数据块 |
+| `FET_transfer_sample.csv` | Plain two-column `Vg,Id` table. |
+| `FET_transfer_double_scan.csv` | Single `Vg,Id` column, one continuous forward+backward sweep. |
+| `FET_transfer_split_scan.csv` | Explicit `Forward Vg,Forward Id,Backward Vg,Backward Id` columns. |
+| `FET_transfer_instrument_multicurve.csv` | Instrument export: metadata header + multiple `DataName/DataValue` blocks. |
 
-## 输出说明
+## Output
 
-| 位置 | 内容 |
+| Location | Contents |
 |---|---|
-| 导入时创建的 workbook（如 `FETImportedData1`） | `Curves`：每条曲线 6 列（`Vg`/`Id`/`Ig`/`absId`/`Vd`/`logAbsId`）；`RawMeta`：跳过的原始文本行，便于排查导入问题。 |
-| Id-Vg graph | 左轴 `\|Id\|` 对数坐标 + 右轴 `Id` 线性坐标叠加显示，forward 实线、backward 点划线，叠加拟合线/参考线/参数摘要。 |
-| 隐藏 workbook `FETGraphData` → `Curves` | 当前正在分析的曲线的 forward/backward 拆分数据 + 合并后的完整曲线，供图上拟合线/hidden source plot 使用，一般不需要手动查看。 |
-| 隐藏 workbook `FETGraphData` → `Extracted Parameters` | **主要结果表**：每条曲线每个方向一行，包含 SS、Vth、gm、迁移率、Ion/Ioff、滞回、拟合参数等全部数值列，可导出或用于批量整理。 |
+| Import workbook (e.g. `FETImportedData1`) | `Curves`: 6 columns per curve (`Vg`/`Id`/`Ig`/`absId`/`Vd`/`logAbsId`); `RawMeta`: skipped raw text lines, for troubleshooting import issues. |
+| Id-Vg graph | Overlaid log `\|Id\|` (left) + linear `Id` (right) axes; forward is a solid line, backward is a thinner solid line; fit lines, reference lines, and the summary box are drawn on top. |
+| Hidden workbook `FETGraphData` → `Curves` | Forward/backward split plus the full combined curve for whichever curve is currently being analyzed — feeds the graph's fit lines and hidden source plot; not normally something you need to open. |
+| Hidden workbook `FETGraphData` → `Extracted Parameters` | **The main results table.** One row per curve per direction — SS, Vth, gm, mobility, Ion/Ioff, hysteresis, and every fit parameter, ready to export or post-process. |
 
-## 项目结构
+## Project layout
 
 ```text
-origin-app/FET Analyzer/       App 源码与打包资源（Origin Apps 目录下的实际名字是 "FET Gadget"）
-  src/FETAnalyzer.c             核心 Origin C 实现（导入、图形、分析全部逻辑）
-  launch.ogs                    App 启动入口（LabTalk）
-  package.ini                   App 元数据（名称、版本、启用条件等）
-  xfunctions/                   可选的 X-Function 封装说明（fet_analyze）
-  examples/                     示例 CSV，覆盖各种支持的输入格式
-  templates/                    图形/分析模板占位说明
-tests/FETAnalyzerSmoke.c        运行时 smoke test（真实调用 Origin C 函数，覆盖导入/分析/UI 状态）
+origin-app/FET Analyzer/       App source and packaging assets (installs as "FET Gadget")
+  src/FETAnalyzer.c              Core Origin C implementation (import, graphing, analysis)
+  launch.ogs                     App entry point (LabTalk)
+  package.ini                    App metadata (name, version, enable conditions, ...)
+  xfunctions/                    Optional X-Function wrapper notes (fet_analyze)
+  examples/                      Sample CSVs covering every supported input format
+  templates/                     Placeholder notes for graph/analysis templates
+tests/FETAnalyzerSmoke.c       Runtime smoke test (calls the real Origin C functions end-to-end)
 tools/
-  build-opx.ps1                 一键编译 + smoke test + 打包 OPX
-  check-package.ps1              纯静态的包结构/元数据检查（不需要 Origin）
+  build-opx.ps1                  One-shot compile + smoke test + OPX packaging
+  check-package.ps1              Static package-structure/metadata check (no Origin required)
 docs/
-  architecture.md                运行时数据流、图层/列布局等实现细节
-  opx-packaging.md               OPX 打包与发布的详细步骤
-data/                            开发过程中使用的真实测量数据样例
+  architecture.md                Runtime data flow, layer/column layout, implementation notes
+  opx-packaging.md               Detailed OPX packaging and release steps
+data/                            Real measurement samples used during development
 ```
 
-## 开发与测试
+## Development
 
 ```powershell
-# 完整构建：编译 + smoke test + 打包
+# Full build: compile + smoke test + package
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\build-opx.ps1
 
-# 跳过运行时 smoke test，只编译 + 打包（更快，但失去运行时验证）
+# Skip the runtime smoke test, compile + package only (faster, less confidence)
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\build-opx.ps1 -SkipSmoke
 
-# 不依赖 Origin 的纯静态包结构检查
+# Static package-structure check, no Origin required
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\check-package.ps1
 ```
 
-`tests/FETAnalyzerSmoke.c` 会真实调用 Origin C 导出的函数（导入、放置 cursor、计算、切换扫描模式
-等），并在检测到桌面上存在真实测量 CSV 时额外跑一遍真实数据的导入/分析，验证曲线数量、图层结构、
-配置按钮、cursor 读写和参数计算结果。详见 [docs/architecture.md](docs/architecture.md) 中的运行时
-数据流说明。
+`tests/FETAnalyzerSmoke.c` drives the real exported Origin C functions (import, cursor placement,
+computation, scan-mode switching, ...) and, when real measurement CSVs are found on the desktop,
+additionally runs a pass against real data — checking curve counts, layer structure, the config
+button, cursor read/write, and computed parameters. See [docs/architecture.md](docs/architecture.md)
+for the full runtime data-flow notes.
 
-## 已知限制 / 后续计划
+## Roadmap
 
-- 目前只支持恒流法之外的一种 Vth 提取方式（线性外推）；恒流法、最大 gm 法待补充。
-- 尚未提供跨曲线的批量报表导出（结果已经在 `Extracted Parameters` 表里逐行累计，可自行用 Origin
-  的导出功能整理）。
-- 栅极漏电（`Ig`）已导入但尚未用于分析。
-- 图形/分析设置目前只在当前 Origin 会话内生效，尚未持久化到 graph 对象或工程文件。
+- Only linear extrapolation is implemented for Vth; constant-current and max-gm methods are not
+  yet available.
+- No batch/cross-curve report export yet (results already accumulate row-by-row in
+  `Extracted Parameters`, which you can export with Origin's own tools).
+- Gate leakage (`Ig`) is imported but not yet used in analysis.
+- Graph/analysis settings are session-local; they aren't yet persisted to the graph object or
+  project file.
 
 ## License
 
