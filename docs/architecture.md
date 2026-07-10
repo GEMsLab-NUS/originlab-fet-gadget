@@ -7,21 +7,57 @@ App Gallery
   -> launch.ogs
   -> run.loadoc(.../src/FETAnalyzer.c)
   -> fet_analyzer_start()
-  -> route by active window
-      -> workbook/no graph:
-           Import Data
-           -> GetMultiOpenBox
-           -> CSV importer
-           -> Curves/RawMeta workbook only
-      -> active graph:
-           Analyze Graph
+  -> a plain modal GetNBox dialog with 4 direct buttons (Import,
+     Single-Curve Analysis, Multi-Curve Analysis, More...) plus a "More..."
+     sub-dialog for the 2 cross-parameter operations -- see "Launcher Menu"
+      -> Import:
+           -> GetMultiOpenBox (single or multiple files)
+           -> 1 file  -> full 6-col/curve layout + single-curve graph
+           -> >1 file -> compact 2-col/curve (Vg/Id only) layout, no graph
+           -> Curves/RawMeta workbook
+      -> Single-Curve Analysis:
+           -> requires an active graph with a curve selected
            -> build overlaid logAbsId/Id layers
            -> detect single or forward/backward scan segments
            -> read solid (+) and dash-dot (-) free cursor lines
            -> convert cursor X bounds to segment-local XYRange objects
            -> Origin C calculation core
            -> graph annotations + hidden fit-data workbook
-           -> [FETResults]Summary
+           -> [FETGraphData]Extracted Parameters
+      -> Multi-Curve Analysis:
+           -> reads the ACTIVE worksheet or graph directly -- no file
+              prompt; source is whatever Import (or a prior multi-curve
+              run) already produced
+           -> batch fitting settings dialog (device, segment,
+              smoothing/windows/R2, histogram bins, starting parameter)
+           -> per-curve auto SS/Vth windows + calculation core,
+              on-graph + status-bar progress while it runs
+           -> [FETStatsData]Parameters / Statistics / Histogram /
+              OverlayCurves
+           -> FETStatsGraph: one-parameter-at-a-time histogram with a
+              scaled normal-distribution overlay, [Prev]/[Next] buttons
+              cycle (closed-loop) through all 6 parameters
+           -> FETMultiOverlayGraph: log+linear overlay, built together
+              with the histograms in the same pass
+      -> Scatter + Histograms:
+           -> requires [FETStatsData]Parameters to already exist (run
+              Multi-Curve Analysis at least once first) -- no curve
+              re-fitting, reads batch results directly
+           -> settings dialog: 2 dropdowns (X parameter, Y parameter)
+           -> tries Origin's native "Marginal Histograms" plot_marginal
+              X-Function first; falls back to a hand-built 3-layer graph
+              (main scatter + marginal histogram per axis) if that doesn't
+              produce a real result -- either way ends up named
+              FETScatterGraph (see "Scatter + Marginal Histograms and
+              Correlation Matrix")
+      -> Correlation Matrix:
+           -> also requires [FETStatsData]Parameters
+           -> settings dialog: checkboxes, which parameters to include
+           -> tries Origin's native "Scatter Matrix" plotmatrix X-Function
+              first; falls back to a pairwise Pearson coefficient table in
+              [FETStatsData]Correlation if that doesn't produce a real
+              result -- either way ends up named FETCorrelationGraph when a
+              graph is produced
 ```
 
 ## Responsibilities
@@ -90,6 +126,213 @@ App Gallery
   the color pickers/presets that used to live under the "Graph" settings
   branch were removed by request.
 
+## Multi-Curve Import and Analysis
+
+- Import decides layout by file count (`fet_analyzer_import_csv`): more than
+  one file selected switches `fet_import_transfer_csv_files_ex` to
+  `multiStyle=true`, which writes only `Vg`/`Id` per curve (2 columns,
+  `FET_IMPORT_COLS_PER_CURVE_COMPACT`) into a `FETMultiData` workbook and
+  builds no graph. A single file keeps the full 6-column layout and the usual
+  single-curve graph. `_fet_detect_curve_layout` recovers which layout a given
+  `Curves` sheet uses later (by column count, then by whether column index 2's
+  long name is `"Vg"`), so multi-curve analysis works on either.
+- Multi-curve analysis (`fet_analyzer_multi_analyze`) never prompts for
+  files. `_fet_find_multi_source_book` resolves the source workbook from
+  whatever's active: the active worksheet's page directly if it has a
+  `Curves` sheet; otherwise, for the active graph, it first checks a hidden
+  `FET_SRC_BOOK` text tag (`_fet_tag_source_book`/`_fet_read_source_book_tag`)
+  written onto the graph when it was built, and only falls back to matching
+  plot dataset names against worksheet-page names
+  (`_fet_find_import_book_for_graph`) if that tag is absent. The tag exists
+  because neither `FETMultiOverlayGraph` nor `FETStatsGraph` plots the
+  original import book directly (they plot `[FETStatsData]OverlayCurves` /
+  `Histogram`), so dataset-name matching alone can't resolve it -- this is
+  what the `[FET Multi]` re-run button on either graph relies on.
+- Because compact imports carry no precomputed `logAbsId`, a hidden
+  `[FETStatsData]OverlayCurves` sheet (4 columns per curve: `Vg`/`Id`/`absId`/
+  `logAbsId`) is derived from whichever layout the source uses
+  (`_fet_build_multi_graph_data`), purely to feed the overlay graph. It never
+  touches the user-facing import table.
+- Batch extraction (`_fet_multi_analyze_core`) runs the same auto range
+  picking and calculation core as single-curve analysis, per curve, on the
+  chosen sweep segment (forward or backward). Curves too short or that fail
+  the fit-quality gates are skipped and listed, never fatal. The curve with
+  the lowest SS among those that succeed becomes `bestCurveIndex`.
+- `FETMultiOverlayGraph` (`_fet_build_multi_overlay_graph`) uses the classic
+  fixed single-curve palette, not a per-curve rainbow: every curve on the log
+  (left) axis is drawn in `options.logCurveColor` (indigo) and every curve on
+  the linear (right) axis in `options.linearCurveColor` (amber) -- the same
+  color a plain single-curve import uses. No legend is drawn. Every curve
+  except `bestCurveIndex` is drawn with real per-plot line transparency
+  (`_fet_style_plot_alpha`, `tr.Root.Line.Transparency.nVal`, verified to
+  round-trip through `GetFormat`/`ApplyFormat`; falls back to the plain
+  opaque style if that tag fails to validate on some Origin version) at a
+  1.0pt width; `bestCurveIndex` is fully opaque at 2.5pt. `_fet_set_y_axis_color`
+  keeps the left/right axis line and label colored to match (indigo/amber),
+  rather than left at Origin's default. The graph carries a `FET_MULTI`
+  button (`[FET Multi]`) that re-runs `fet_analyzer_multi_analyze()` using
+  its own source workbook.
+- Outputs are singletons, rebuilt per run: `[FETStatsData]Parameters` (one row
+  per analyzed curve: SS, R2s, Vth, gm in uS, mobility, Ion/Ioff densities in
+  uA/um, ratio and log10 ratio), `[FETStatsData]Statistics` (N/mean/SD/median/
+  min/max/CV per parameter, one row per of the 6 parameters), and
+  `[FETStatsData]Histogram` (bin centers/counts plus normal-curve samples, 4
+  columns per parameter). Histogram bins default to the sqrt rule clamped to
+  [4, 15]; the normal overlay is scaled by `N * binWidth` so it sits directly
+  on the counts.
+- `FETStatsGraph` is a **single layer**, not a multi-layer grid. An earlier
+  six-layer-per-page 2x3 grid (each layer individually positioned via
+  `layer.left/top/width/height`) kept rendering as a stale, overlapping mess
+  even though every layer's geometry read back correct immediately after
+  being set (confirmed via headless COM probes reproducing the exact
+  add-layer/position/plot sequence). `_fet_render_stats_param` now draws
+  exactly one parameter's histogram + Gaussian overlay + N/mean/SD label into
+  that one layer, reading only from the already-computed
+  `[FETStatsData]Statistics`/`Histogram` sheets (so switching parameters
+  never re-runs curve fitting), and `[Prev]`/`[Next]` buttons
+  (`fet_analyzer_stats_prev_param`/`_next_param`, module-level
+  `g_fet_stats_current_param`, wrapped with `%` so the cycle is closed-loop
+  in both directions) cycle through all 6. `_fet_stats_param_meta` is the
+  single source of truth for each parameter's name/unit/axis title, shared
+  by the data-computation step (`_fet_stats_compute`) and the renderer so
+  the two can't drift out of sync on ordering. `[Prev]`/`[Next]` sit in the
+  bottom corners (`-p 2 3` / `-p 88 3`), not the top-right, so they don't
+  collide with the `[FET Multi]` button which lives at `-p 88 97`.
+- **Page sizing root cause**: `GraphPage.Resize(w, h, 101)` only sets an
+  initial GDI size hint. The actual final page size is a *separate*,
+  absolute-unit LabTalk aspect-lock -- `page.kar=0;page.width=N;page.height=N;`
+  where `N` is in units of 1/600 inch (`4560` = 7.6in, the size every
+  single-curve graph already used) -- and Resize() alone silently has no
+  visible effect unless page.width/height are set to match. The original
+  six-layer stats grid never set page.width/height explicitly at all, so it
+  inherited whatever tiny default a blank "Origin"-type page happens to get;
+  that (not the multi-layer positioning, which read back correct) is what
+  actually made 12pt+ text overlap everything -- `_fet_set_graph_page_ratio`
+  now takes both `sizeUnits` and `pageWidthUnits` and every graph in this
+  file (including `FETStatsGraph`, at 5.00in / `pageWidthUnits=3000`, and
+  `FETScatterGraph`, at 6.00in / `pageWidthUnits=3600`) sets both together.
+  `_fet_render_stats_param` re-asserts this on every parameter switch, not
+  just once at graph creation, as cheap insurance against Origin reflowing
+  the layer back to a smaller default after `RemovePlot`/`AddPlot` churn.
+- The batch settings dialog (`_fet_get_multi_options`) shares
+  `g_fet_dialog_options` device/extraction fields with the single-curve
+  settings dialog, so tuning them anywhere tunes both flows. It also has a
+  "Show parameter" dropdown that sets `g_fet_stats_current_param` directly,
+  so a run can start on any of the 6 parameters, not always SS.
+- Progress: CSV import and the per-curve batch-fitting loop both drive a
+  native `progressBox` (confirmed working headlessly via COM probe) with
+  `SetRange(0, N)` / `Set(i)` per item -- `Set()` returns `false` if the user
+  clicked Cancel, which stops the loop early but keeps whatever was already
+  imported/analyzed rather than discarding it. They also still report
+  through `_fet_report_progress_status` (an ASCII `[####----]` bar written to
+  Origin's status bar via `type -s`, with any embedded filename escaped
+  first) alongside the progress box. The batch-fitting loop additionally
+  shows a live on-graph readout (`_fet_update_progress_label`, the same
+  `label -p` text-object pattern used for every other on-graph annotation in
+  this file) on the statistics graph's first panel while it runs, removed
+  once fitting finishes.
+
+## Launcher Menu
+
+- `fet_analyzer_start()` shows a plain `GetNBox` dialog (`_fet_show_start_dialog`)
+  -- an ordinary modal Windows dialog, not a graph page. An earlier version
+  drew the 5 operations as button `GraphObjects` on a hidden-axes graph page
+  to get a guaranteed vertical layout; that read as "the App just opened a
+  plot" rather than a menu and was reverted on user feedback. A later version
+  used a `GETN_LIST` dropdown instead (since GetNBox's custom-button
+  mechanism tops out at 4 extra buttons -- `GETNE_ON_CUSTOM_BUTTON5` does not
+  exist, confirmed by probe -- one short of the 5 operations); that was also
+  reverted on user feedback ("I don't want a dropdown, direct buttons are
+  best").
+- The current design is 2 levels of `GETN_CUSTOM_BUTTON` dialogs, respecting
+  both constraints at once: the main dialog (`_fet_start_dialog_event`) has 4
+  direct buttons -- Import, Single-Curve Analysis, Multi-Curve Analysis,
+  More... -- and choosing "More..." (`s_fet_start_action == -1`) opens a
+  second dialog (`_fet_show_more_dialog`/`_fet_more_dialog_event`) with 2
+  more direct buttons -- Back, Scatter + Histograms, Correlation Matrix.
+  `s_fet_start_action` (module-level) carries the chosen `FET_LAUNCH_*`
+  constant back out through `PEVENT_GETN_RET_TO_CLOSE`, and
+  `fet_analyzer_start()` dispatches to each entry function directly.
+
+## Scatter + Marginal Histograms and Correlation Matrix
+
+- Both read `[FETStatsData]Parameters` directly rather than re-fitting
+  curves -- they're cross-parameter analyses over batch results that must
+  already exist (Multi-Curve Analysis has to have run at least once).
+  `_fet_batch_param_col_name` maps an 8-entry selection index (SS, Vth, gm,
+  Mobility, Ion, Ioff, Ion/Ioff, log10(Ion/Ioff)) to its `Parameters` column;
+  `_fet_read_batch_param_pair` reads two columns index-aligned to the same
+  curve, skipping rows with an empty `Curve` name (padding) or either value
+  missing.
+- Both first try Origin's own built-in graph-gallery template via its
+  X-Function, and only fall back to a hand-built equivalent if that doesn't
+  produce a real result. This "try native, then fall back" design exists
+  because `plot_marginal`/`plotmatrix` behaved *inconsistently* under
+  headless COM automation in this session's testing: neither the
+  X-Function's own success/failure signal (`LT_execute()`'s return value)
+  nor comparing `Project.ActiveLayer()`'s page name against the source book
+  reliably indicated whether a correct graph was actually built --
+  `plot_marginal` was observed returning `LT_execute()==false` while still
+  building a fully correct 3-layer graph (a false negative), and `plotmatrix`
+  was observed returning `LT_execute()==true` while only emitting several
+  junk single-layer throwaway pages instead of one real matrix grid (a false
+  positive). The only check proven reliable by probing: snapshot every
+  `GraphPage` name before the call
+  (`_fet_snapshot_graph_page_names`), diff after, and judge each newly
+  created page by its **shape** (`GraphPage.Layers.Count()`), not just its
+  existence -- `_fet_pick_new_graph_page(before, minLayers, &graphName)`
+  picks the new page with the highest layer count, requires it to clear
+  `minLayers` (3 for the marginal-histogram main+2-margins shape; roughly
+  the selected parameter count for a scatter-matrix grid), and destroys
+  every OTHER newly created page either way so a degenerate X-Function call
+  never leaves clutter pages behind. On success, `_fet_rename_graph_page_to`
+  renames the X-Function's auto-generated page name to this App's fixed page
+  name (destroying any stale page already occupying it first), so downstream
+  code (re-running the same operation, the `[FET Multi]`-style source-book
+  tag pattern, tests) can find "the" scatter/correlation graph by a fixed
+  name regardless of which path built it. Because this behavior wasn't
+  confirmed the same way in a live interactive Origin session, treat the
+  native path as "should generally work, hand-built fallback is the safety
+  net" rather than guaranteed.
+- `fet_analyzer_scatter_hist` / `_fet_get_scatter_options`: two `GETN_LIST`
+  dropdowns pick the X and Y parameter. `_fet_build_scatter_hist_graph`
+  first tries `plot_marginal` (`_fet_try_native_marginal_plot`, Origin's
+  native "Marginal Histograms" gallery template); if that doesn't clear the
+  3-layer bar above, `_fet_build_scatter_hist_graph_fallback` builds
+  `FETScatterGraph` by hand instead: a main scatter (bottom-left,
+  `IDM_PLOT_SCATTER`) plus one marginal histogram per axis, aligned to the
+  main layer's own autoscaled range. The main layer is autoscaled first via
+  `layer -a;`, then its `layer.x.from/to`/`layer.y.from/to` are read back
+  (`LT_get_var`) and applied to the top (X) and right (Y) marginal layers so
+  all three visually line up -- rather than relying on any shared-axis
+  mechanism. The top panel uses `IDM_PLOT_COLUMN` (vertical bars, X=bin
+  center/Y=count, the same type the statistics graph's histograms use); the
+  right panel uses `IDM_PLOT_BAR` with the *same* column roles (X=count,
+  Y=bin center) for the "rotated" horizontal-bar look -- `IDM_PLOT_BAR`'s
+  exact orientation isn't independently visually confirmed, only that it
+  compiles and produces a valid plot object, so if it renders unexpectedly
+  the fix is switching that one panel to a swapped-axis `IDM_PLOT_LINE`
+  density curve instead (a lower-risk fallback that was scoped out only for
+  time, not correctness). `_fet_graph_add_layer` (the layer-adding helper
+  originally written for the six-panel stats grid, since renamed and kept
+  for this) adds the two marginal layers.
+- `fet_analyzer_correlation_matrix` / `_fet_get_correlation_options`: 8
+  `GETN_CHECK` boxes pick which parameters to include (>=2 required).
+  `_fet_build_correlation_matrix` first tries `plotmatrix`
+  (`_fet_try_native_scatter_matrix`, Origin's native "Scatter Matrix"
+  gallery template, ellipse + linear fit overlays enabled); if that doesn't
+  clear the layer-count bar above, it falls back to computing pairwise
+  Pearson correlation (`_fet_pearson_correlation`) over every selected
+  pair's paired values and writing an NxN coefficient table to
+  `[FETStatsData]Correlation` (self-correlation forced to exactly `1.0` on
+  the diagonal rather than computed, since a zero-variance pair would
+  otherwise return `NANUM`) -- a **plain numeric table, not a colored
+  heatmap image**, since Origin C's worksheet cell/conditional-formatting
+  API isn't exercised anywhere else in this file. The native path is the
+  intended way to get an actual correlation *plot* per the user's request;
+  the table is strictly a fallback for when the native template can't be
+  confirmed.
+
 ## Analysis Output
 
 - SS and linear-range fit lines are dashed, extended beyond their selected
@@ -135,3 +378,13 @@ App Gallery
 2. Add constant-current and maximum-gm Vth methods.
 3. Add gate leakage analysis from `Ig`.
 4. Add batch report export.
+5. Confirm in a live interactive Origin session whether `plot_marginal`/
+   `plotmatrix` actually produce their native gallery templates (headless
+   COM testing this session could only confirm the *detection* logic is
+   sound, not that the native templates render correctly end-to-end) --
+   see "Scatter + Marginal Histograms and Correlation Matrix". If the
+   native `plotmatrix` path never clears the layer-count bar in practice,
+   the hand-built Pearson coefficient table remains the permanent fallback,
+   and a color-coded heatmap would need its own follow-up API investigation.
+6. Confirm `IDM_PLOT_BAR`'s rendered orientation on a live Origin session and
+   swap to a swapped-axis line-density fallback if it isn't horizontal.

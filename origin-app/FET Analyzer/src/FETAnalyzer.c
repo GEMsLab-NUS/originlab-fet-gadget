@@ -9,11 +9,15 @@
 #include <xfutils.h>
 #include <sys_utils.h>
 
-#define FET_APP_TITLE "FET Gadget v0.7.4"
+#define FET_APP_TITLE "FET Gadget v0.11.0"
 #define FET_MIN_POINTS 3
 #define FET_IMPORT_COLS_PER_CURVE 6
+#define FET_IMPORT_COLS_PER_CURVE_COMPACT 2
 #define FET_LAUNCH_IMPORT_CSV 1
 #define FET_LAUNCH_GRAPH_ANALYSIS 2
+#define FET_LAUNCH_MULTI_ANALYZE 3
+#define FET_LAUNCH_SCATTER_HIST 4
+#define FET_LAUNCH_CORRELATION_MATRIX 5
 #define FET_AUTO_RANGE_MAX_POINTS 30
 #define FET_CURSOR_SS_START "FET_SS_START"
 #define FET_CURSOR_SS_END "FET_SS_END"
@@ -44,6 +48,17 @@
 #define FET_HYST_CURSOR "FET_HYST"
 #define FET_HYST_SUMMARY "FET_HYST_SUMMARY"
 #define FET_GRAPH_DATA_PAGE "FETGraphData"
+#define FET_MULTI_BUTTON "FET_MULTI"
+#define FET_MULTI_PROGRESS_LABEL "FET_PROGRESS"
+#define FET_SOURCE_BOOK_TAG "FET_SRC_BOOK"
+#define FET_STATS_DATA_PAGE "FETStatsData"
+#define FET_STATS_GRAPH_PAGE "FETStatsGraph"
+#define FET_MULTI_OVERLAY_GRAPH_PAGE "FETMultiOverlayGraph"
+#define FET_STATS_PARAM_COUNT 6
+#define FET_BATCH_PARAM_COUNT 8
+#define FET_SCATTER_DATA_PAGE "FETScatterData"
+#define FET_SCATTER_GRAPH_PAGE "FETScatterGraph"
+#define FET_CORRELATION_GRAPH_PAGE "FETCorrelationGraph"
 
 typedef struct tagFETOptions
 {
@@ -98,6 +113,11 @@ typedef struct tagFETImportContext
     int metaRow;
     int maxRows;
     bool makeGraph;
+    // Compact multi-curve mode: only Vg/Id are written per curve (2 columns
+    // instead of the full 6), and no graph is built at import time -- the
+    // overlay/statistics graphs are built later by multi-curve analysis.
+    bool multiStyle;
+    int colsPerCurve;
 } FETImportContext;
 
 typedef struct tagFETRangeIndices
@@ -135,6 +155,7 @@ typedef struct tagFETDialogOptions
 } FETDialogOptions;
 
 static void _fet_add_config_button(GraphLayer& gl);
+static void _fet_add_multi_button(GraphLayer& gl);
 static int _fet_rgb_color(int red, int green, int blue);
 static bool _fet_is_helper_plot(DataPlot& plot);
 static void _fet_style_plot(DataPlot& plot, int color, bool symbols,
@@ -240,6 +261,23 @@ static int _fet_blend_color(int color, int target, double targetWeight)
     return _fet_rgb_color(red, green, blue);
 }
 
+// 10-color categorical palette for the statistics histogram panels, tuned to
+// read like a high-impact-journal figure: muted, high-contrast hues that
+// stay distinguishable when blended for histogram fills.
+static int _fet_multi_curve_rgb(int index, int& red, int& green, int& blue)
+{
+    vector<int> reds   = {  13, 230,   0, 225, 126,  77,  60, 183,  35, 140 };
+    vector<int> greens = {  93,  75, 160, 135,  47, 187,  84,  34, 139,  86 };
+    vector<int> blues  = { 165,  53, 135,  39, 142, 213, 136,  48,  69,  75 };
+    int ii = index % reds.GetSize();
+    if (ii < 0)
+        ii += reds.GetSize();
+    red = reds[ii];
+    green = greens[ii];
+    blue = blues[ii];
+    return _fet_rgb_color(red, green, blue);
+}
+
 static double _fet_current_density_factor()
 {
     FETDialogOptions options;
@@ -255,6 +293,47 @@ static void _fet_message(LPCSTR lpcszMessage, UINT nFlags = MB_OK | MB_ICONINFOR
 static bool _fet_valid_number(double value)
 {
     return !is_missing_value(value);
+}
+
+// Status-bar text can't safely embed an arbitrary filename verbatim inside a
+// quoted LabTalk script string (a stray quote or backslash would break the
+// command), so escape both before formatting it in.
+static void _fet_escape_labtalk_string(LPCSTR in, string& out)
+{
+    out = in;
+    out.Replace("\\", "\\\\");
+    out.Replace("\"", "\\\"");
+}
+
+// Lightweight ASCII progress bar written to Origin's status bar -- used for
+// both multi-file CSV import and multi-curve batch analysis so long-running
+// operations show visible progress without a custom dialog.
+static void _fet_report_progress_status(LPCSTR phase, int current, int total,
+                                        LPCSTR label)
+{
+    string safeLabel;
+    _fet_escape_labtalk_string(label, safeLabel);
+
+    int ticks = 20;
+    int filled = 0;
+    if (total > 0)
+    {
+        filled = (int)(ticks * 1.0 * current / total + 0.5);
+        if (filled < 0) filled = 0;
+        if (filled > ticks) filled = ticks;
+    }
+    string bar;
+    int ii;
+    for (ii = 0; ii < filled; ii++) bar += "#";
+    for (ii = filled; ii < ticks; ii++) bar += "-";
+    int pct = total > 0 ? (int)(100.0 * current / total) : 0;
+
+    string msg;
+    msg.Format("%s [%s] %d%% (%d/%d) %s", phase, bar, pct, current, total,
+              safeLabel);
+    string script;
+    script.Format("type -s \"%s\";", msg);
+    LT_execute(script);
 }
 
 static void _fet_clean_xy(const vector& vxIn, const vector& vyIn, vector& vx, vector& vy)
@@ -604,11 +683,13 @@ static void _fet_import_error_text(int code, string& text)
         text.Format("error %d", code);
 }
 
-static bool _fet_prepare_import_context(FETImportContext& ctx, bool makeGraph)
+static bool _fet_prepare_import_context(FETImportContext& ctx, bool makeGraph,
+                                        bool multiStyle = false)
 {
     WorksheetPage page;
     page.Create("Origin");
-    page.SetName("FETImportedData", OCD_ENUM_NEXT);
+    page.SetName(multiStyle ? "FETMultiData" : "FETImportedData",
+                 OCD_ENUM_NEXT);
     ctx.curves = page.Layers(0);
     ctx.curves.SetName("Curves");
     ctx.curves.SetSize(0, 0);
@@ -624,12 +705,16 @@ static bool _fet_prepare_import_context(FETImportContext& ctx, bool makeGraph)
     ctx.metaRow = 0;
     ctx.maxRows = 0;
     ctx.makeGraph = makeGraph;
+    ctx.multiStyle = multiStyle;
+    ctx.colsPerCurve = multiStyle ? FET_IMPORT_COLS_PER_CURVE_COMPACT
+                                  : FET_IMPORT_COLS_PER_CURVE;
 
     if (makeGraph)
     {
         GraphPage gp;
         gp.Create("DOUBLEY");
-        gp.SetName("FETImportedGraph", OCD_ENUM_NEXT);
+        gp.SetName(multiStyle ? "FETMultiGraph" : "FETImportedGraph",
+                   OCD_ENUM_NEXT);
         ctx.graphLayer = gp.Layers(0);
         ctx.linearGraphLayer = gp.Layers(1);
     }
@@ -646,11 +731,11 @@ static void _fet_append_import_meta(FETImportContext& ctx, LPCSTR fileName,
 }
 
 static void _fet_set_import_column_labels(Worksheet& wks, int baseCol,
-                                          LPCSTR label)
+                                          int colsPerCurve, LPCSTR label)
 {
     vector<string> names = { "Vg", "Id", "Ig", "absId", "Vd", "logAbsId" };
     vector<string> units = { "V", "A", "A", "A", "V", "log10(A)" };
-    for (int ii = 0; ii < FET_IMPORT_COLS_PER_CURVE; ii++)
+    for (int ii = 0; ii < colsPerCurve; ii++)
     {
         Column col = wks.Columns(baseCol + ii);
         col.SetLongName(names[ii]);
@@ -693,14 +778,24 @@ static bool _fet_set_right_tick_formula(GraphLayer& gl, LPCSTR formula)
     return axis.ApplyFormat(format, true, true, true);
 }
 
-static void _fet_set_graph_page_ratio(GraphLayer& gl)
+// page.width/page.height are in 1/600 inch (4560/600 = 7.6in, the original
+// single-curve graph size) -- independent of the Resize() call above, which
+// only sets an initial GDI size hint before this LabTalk aspect-lock takes
+// over. The two must be changed together, or a Resize() alone silently has
+// no visible effect on the final page size.
+static void _fet_set_graph_page_ratio(GraphLayer& gl, int sizeUnits = 420,
+                                      int pageWidthUnits = 4560)
 {
     if (!gl)
         return;
     GraphPage gp = gl.GetPage();
     if (gp)
-        gp.Resize(420, 420, 101);
-    gl.LT_execute("page.kar=0;page.width=4560;page.height=4560;layer.unit=0;layer.left=14;layer.top=10;layer.width=76;layer.height=76;");
+        gp.Resize(sizeUnits, sizeUnits, 101);
+    string script;
+    script.Format("page.kar=0;page.width=%d;page.height=%d;"
+                  "layer.unit=0;layer.left=14;layer.top=10;layer.width=76;layer.height=76;",
+                  pageWidthUnits, pageWidthUnits);
+    gl.LT_execute(script);
     gl.LT_execute("page.zoomWhole=1;");
 }
 
@@ -1055,10 +1150,41 @@ static void _fet_attach_plot_to_axis(DataPlot& plot, int axis)
     plot.SetAttachedAxis(axis);
 }
 
+// Real per-plot line transparency: Origin's Line format Tree accepts a
+// Transparency tag (0-100) alongside Color/Width/Style, verified via
+// UpdateThemeIDs + a GetFormat round-trip. Falls back to the plain opaque
+// style if that tag fails to validate on some Origin version, so a bad
+// fallback never also loses the color/width that DID validate.
+static void _fet_style_plot_alpha(DataPlot& plot, int color, double lineWidth,
+                                  int transparencyPercent)
+{
+    if (!plot)
+        return;
+    if (transparencyPercent <= 0)
+    {
+        _fet_style_plot(plot, color, false, LINE_STYLE_SOLID, lineWidth);
+        return;
+    }
+    Tree tr;
+    tr = plot.GetFormat(FPB_ALL, FOB_ALL, true, true);
+    tr.Root.Line.Color.nVal = color;
+    tr.Root.Line.Width.dVal = lineWidth;
+    tr.Root.Line.Style.nVal = LINE_STYLE_SOLID;
+    tr.Root.Line.Transparency.nVal = transparencyPercent;
+    if (0 == plot.UpdateThemeIDs(tr.Root))
+        plot.ApplyFormat(tr, true, true);
+    else
+        _fet_style_plot(plot, color, false, LINE_STYLE_SOLID, lineWidth);
+    plot.SetLineType(LINE_STYLE_SOLID);
+}
+
 static int _fet_add_segmented_visible_plots(GraphLayer& gl, Worksheet& wks,
                                             int xColumn, int yColumn,
                                             int rowCount, const vector& vx,
-                                            int color, int axis)
+                                            int color, int axis,
+                                            double forwardWidth = FET_FORWARD_LINE_WIDTH,
+                                            double backwardWidth = FET_BACKWARD_LINE_WIDTH,
+                                            int transparencyPercent = 0)
 {
     if (!gl || !wks || rowCount < FET_MIN_POINTS)
         return 0;
@@ -1071,8 +1197,7 @@ static int _fet_add_segmented_visible_plots(GraphLayer& gl, Worksheet& wks,
     forwardRange.Add(wks, yColumn, "Y", yColumn, 0, forwardEnd);
     int forwardIndex = gl.AddPlot(forwardRange, IDM_PLOT_LINE);
     DataPlot forwardPlot = gl.DataPlots(forwardIndex);
-    _fet_style_plot(forwardPlot, color, false, LINE_STYLE_SOLID,
-                   FET_FORWARD_LINE_WIDTH);
+    _fet_style_plot_alpha(forwardPlot, color, forwardWidth, transparencyPercent);
     _fet_attach_plot_to_axis(forwardPlot, axis);
     int added = forwardPlot ? 1 : 0;
 
@@ -1083,8 +1208,7 @@ static int _fet_add_segmented_visible_plots(GraphLayer& gl, Worksheet& wks,
         backwardRange.Add(wks, yColumn, "Y", yColumn, turnIndex, rowCount - 1);
         int backwardIndex = gl.AddPlot(backwardRange, IDM_PLOT_LINE);
         DataPlot backwardPlot = gl.DataPlots(backwardIndex);
-        _fet_style_plot(backwardPlot, color, false, LINE_STYLE_SOLID,
-                       FET_BACKWARD_LINE_WIDTH);
+        _fet_style_plot_alpha(backwardPlot, color, backwardWidth, transparencyPercent);
         _fet_attach_plot_to_axis(backwardPlot, axis);
         if (backwardPlot)
             added++;
@@ -1310,10 +1434,10 @@ static bool _fet_flush_import_curve(FETImportContext& ctx, LPCSTR filePath,
         return false;
 
     int curveIndex = ctx.curveCount;
-    int baseCol = curveIndex * FET_IMPORT_COLS_PER_CURVE;
+    int baseCol = curveIndex * ctx.colsPerCurve;
     if (nRows > ctx.maxRows)
         ctx.maxRows = nRows;
-    ctx.curves.SetSize(ctx.maxRows, baseCol + FET_IMPORT_COLS_PER_CURVE);
+    ctx.curves.SetSize(ctx.maxRows, baseCol + ctx.colsPerCurve);
 
     string label = GetFileName(filePath, true);
     if (blockIndex > 1)
@@ -1322,12 +1446,14 @@ static bool _fet_flush_import_curve(FETImportContext& ctx, LPCSTR filePath,
         suffix.Format(" #%d", blockIndex);
         label += suffix;
     }
-    _fet_set_import_column_labels(ctx.curves, baseCol, label);
+    _fet_set_import_column_labels(ctx.curves, baseCol, ctx.colsPerCurve, label);
 
     for (int rr = 0; rr < nRows; rr++)
     {
         ctx.curves.SetCell(rr, baseCol, vVg[rr]);
         ctx.curves.SetCell(rr, baseCol + 1, vId[rr]);
+        if (ctx.colsPerCurve < FET_IMPORT_COLS_PER_CURVE)
+            continue;
         ctx.curves.SetCell(rr, baseCol + 2, rr < vIg.GetSize() ? vIg[rr] : NANUM);
         ctx.curves.SetCell(rr, baseCol + 3, rr < vAbsId.GetSize() ? vAbsId[rr] : fabs(vId[rr]));
         ctx.curves.SetCell(rr, baseCol + 4, rr < vVd.GetSize() ? vVd[rr] : NANUM);
@@ -1335,7 +1461,13 @@ static bool _fet_flush_import_curve(FETImportContext& ctx, LPCSTR filePath,
         ctx.curves.SetCell(rr, baseCol + 5, absValue > 0 ? log10(absValue) : NANUM);
     }
 
-    if (ctx.makeGraph && ctx.graphLayer && ctx.linearGraphLayer)
+    // Compact (Vg/Id-only) imports carry no precomputed logAbsId column, so
+    // there is nothing to feed the log-axis layer here -- only reachable if
+    // a future caller asks for makeGraph with the compact layout, which the
+    // current entry points never do (multi-curve analysis builds its own
+    // overlay graph from derived data instead).
+    if (ctx.makeGraph && ctx.graphLayer && ctx.linearGraphLayer
+        && ctx.colsPerCurve >= FET_IMPORT_COLS_PER_CURVE)
     {
         FETDialogOptions graphOptions;
         _fet_get_effective_dialog_options(graphOptions);
@@ -1620,8 +1752,8 @@ static int _fet_import_one_csv(FETImportContext& ctx, LPCSTR filePath)
     return producedCount;
 }
 
-int fet_import_transfer_csv_files(LPCSTR lpcszFiles, TreeNode& resultTree,
-                                  bool makeGraph = true)
+int fet_import_transfer_csv_files_ex(LPCSTR lpcszFiles, TreeNode& resultTree,
+                                     bool makeGraph, bool multiStyle)
 {
     string files(lpcszFiles);
     if (files.IsEmpty())
@@ -1633,16 +1765,22 @@ int fet_import_transfer_csv_files(LPCSTR lpcszFiles, TreeNode& resultTree,
         return 1;
 
     FETImportContext ctx;
-    if (!_fet_prepare_import_context(ctx, makeGraph))
+    if (!_fet_prepare_import_context(ctx, makeGraph, multiStyle))
         return 2;
 
     int failed = 0;
     string failedDetails;
+    progressBox pb("Importing FET transfer CSV files...");
+    pb.SetRange(0, paths.GetSize());
     for (int ii = 0; ii < paths.GetSize(); ii++)
     {
         _fet_trim_string(paths[ii]);
         if (paths[ii].IsEmpty())
             continue;
+        if (!pb.Set(ii))
+            break;  // user clicked Cancel -- keep whatever imported so far
+        _fet_report_progress_status("Importing", ii + 1, paths.GetSize(),
+                                    GetFileName(paths[ii], true));
         int imported = _fet_import_one_csv(ctx, paths[ii]);
         if (imported <= 0)
         {
@@ -1656,6 +1794,8 @@ int fet_import_transfer_csv_files(LPCSTR lpcszFiles, TreeNode& resultTree,
             failedDetails += detail;
         }
     }
+    pb.Set(paths.GetSize());
+    LT_execute("type -s \"Import complete.\";");
 
     if (ctx.makeGraph && ctx.graphLayer)
     {
@@ -1682,6 +1822,13 @@ int fet_import_transfer_csv_files(LPCSTR lpcszFiles, TreeNode& resultTree,
     }
 
     return ctx.curveCount > 0 ? 0 : 3;
+}
+
+int fet_import_transfer_csv_files(LPCSTR lpcszFiles, TreeNode& resultTree,
+                                  bool makeGraph = true)
+{
+    return fet_import_transfer_csv_files_ex(lpcszFiles, resultTree,
+                                            makeGraph, false);
 }
 
 static bool _fet_linear_fit(const vector& vx, const vector& vy,
@@ -2400,6 +2547,135 @@ static void _fet_add_config_button(GraphLayer& gl)
     gl.LT_execute(script);
 }
 
+// [FET Multi] button on multi-curve overlay/statistics graphs. Clicking it
+// re-runs the unified multi-curve analysis (settings dialog, then batch
+// extraction + overlay + histograms) using this graph's own source workbook,
+// so the user never has to return to the start menu to refresh a batch.
+static void _fet_add_multi_button(GraphLayer& gl)
+{
+    if (!gl)
+        return;
+
+    set_active_layer(gl);
+    GraphObject button = gl.GraphObjects(FET_MULTI_BUTTON);
+    if (!button)
+    {
+        gl.LT_execute("label -p 88 97 -j 1 -n FET_MULTI [FET Multi];");
+        button = gl.GraphObjects(FET_MULTI_BUTTON);
+    }
+    if (!button)
+        return;
+
+    button.Text = "[FET Multi]";
+
+    string script;
+    script += FET_MULTI_BUTTON;
+    script += ".fsize=9;";
+    script += FET_MULTI_BUTTON;
+    script += ".color=color(37,99,235);";
+    script += FET_MULTI_BUTTON;
+    script += ".background=0;";
+    script += FET_MULTI_BUTTON;
+    script += ".show=1;";
+    script += FET_MULTI_BUTTON;
+    script += ".script$=\"fet_analyzer_multi_analyze();\";";
+    script += FET_MULTI_BUTTON;
+    script += ".script=1;";
+    gl.LT_execute(script);
+}
+
+// Records which imported Curves workbook a multi-curve graph was built
+// from, as a hidden text object on that graph. The [FET Multi] re-run
+// button needs to resolve this workbook when clicked from EITHER the
+// overlay graph or the statistics graph -- neither plots directly from the
+// original import book (the overlay plots derived OverlayCurves data, the
+// statistics graph plots binned Histogram data), so dataset-name matching
+// against worksheet-page names can't find it the way it does for the
+// single-curve settings button. A direct tag sidesteps that entirely.
+static void _fet_tag_source_book(GraphLayer& gl, LPCSTR bookName)
+{
+    if (!gl || !bookName || !bookName[0])
+        return;
+    _fet_delete_graph_object(gl, FET_SOURCE_BOOK_TAG);
+    set_active_layer(gl);
+    string script;
+    script.Format("label -p 1 1 -n %s placeholder;", FET_SOURCE_BOOK_TAG);
+    gl.LT_execute(script);
+    GraphObject tag = gl.GraphObjects(FET_SOURCE_BOOK_TAG);
+    if (!tag)
+        return;
+    tag.Text = bookName;
+    string hideScript;
+    hideScript.Format("%s.show=0;", FET_SOURCE_BOOK_TAG);
+    gl.LT_execute(hideScript);
+}
+
+static bool _fet_read_source_book_tag(GraphLayer& gl, string& bookName)
+{
+    if (!gl)
+        return false;
+    GraphObject tag = gl.GraphObjects(FET_SOURCE_BOOK_TAG);
+    if (!tag)
+        return false;
+    bookName = tag.Text;
+    return !bookName.IsEmpty();
+}
+
+// On-graph progress readout for the batch curve-fitting loop in multi-curve
+// analysis (the slow, per-curve step). Reuses the same "label -p" text-object
+// pattern as every other on-graph annotation in this file, so it needs no
+// unverified drawing API -- just a centered text block that gets overwritten
+// each iteration and deleted once the loop finishes.
+static void _fet_update_progress_label(GraphLayer& gl, LPCSTR phase,
+                                       int current, int total, LPCSTR label)
+{
+    if (!gl)
+        return;
+    GraphObject existing = gl.GraphObjects(FET_MULTI_PROGRESS_LABEL);
+    if (!existing)
+    {
+        set_active_layer(gl);
+        string createScript;
+        createScript.Format("label -p 50 55 -j 2 -n %s placeholder;",
+                            FET_MULTI_PROGRESS_LABEL);
+        gl.LT_execute(createScript);
+        existing = gl.GraphObjects(FET_MULTI_PROGRESS_LABEL);
+    }
+    if (!existing)
+        return;
+
+    int ticks = 24;
+    int filled = 0;
+    if (total > 0)
+    {
+        filled = (int)(ticks * 1.0 * current / total + 0.5);
+        if (filled < 0) filled = 0;
+        if (filled > ticks) filled = ticks;
+    }
+    string bar;
+    int ii;
+    for (ii = 0; ii < filled; ii++) bar += "#";
+    for (ii = filled; ii < ticks; ii++) bar += "-";
+    int pct = total > 0 ? (int)(100.0 * current / total) : 0;
+
+    string text;
+    text.Format("%s\n[%s] %d%%\n(%d / %d) %s", phase, bar, pct, current,
+               total, label);
+    existing.Text = text;
+    string style;
+    style.Format("%s.fsize=11;%s.fillcolor=color(255,255,255);%s.transparency=8;",
+                 FET_MULTI_PROGRESS_LABEL, FET_MULTI_PROGRESS_LABEL,
+                 FET_MULTI_PROGRESS_LABEL);
+    gl.LT_execute(style);
+}
+
+static void _fet_remove_progress_label(GraphLayer& gl)
+{
+    if (!gl)
+        return;
+    _fet_delete_graph_object(gl, FET_MULTI_PROGRESS_LABEL);
+}
+
 static void _fet_remove_backward_range_cursors(GraphLayer& gl)
 {
     vector<string> names = {
@@ -2744,15 +3020,15 @@ static void _fet_clear_graph_output(GraphLayer& leftLayer,
     }
 }
 
-static Worksheet _fet_graph_data_sheet(LPCSTR sheetName, int minCols,
-                                       bool clearExisting)
+static Worksheet _fet_named_page_sheet(LPCSTR pageName, LPCSTR sheetName,
+                                       int minCols, bool clearExisting)
 {
-    WorksheetPage page(FET_GRAPH_DATA_PAGE);
+    WorksheetPage page(pageName);
     bool created = false;
     if (!page)
     {
         page.Create("Origin");
-        page.SetName(FET_GRAPH_DATA_PAGE, OCD_ENUM_NEXT);
+        page.SetName(pageName, OCD_ENUM_NEXT);
         created = true;
     }
     Worksheet wks = page.Layers(sheetName);
@@ -2783,6 +3059,13 @@ static Worksheet _fet_graph_data_sheet(LPCSTR sheetName, int minCols,
     else if (wks.GetNumCols() < minCols)
         wks.SetSize(wks.GetNumRows(), minCols);
     return wks;
+}
+
+static Worksheet _fet_graph_data_sheet(LPCSTR sheetName, int minCols,
+                                       bool clearExisting)
+{
+    return _fet_named_page_sheet(FET_GRAPH_DATA_PAGE, sheetName, minCols,
+                                 clearExisting);
 }
 
 static Worksheet _fet_extracted_sheet(bool clearExisting)
@@ -3597,6 +3880,1585 @@ int fet_analyze_xf_core(const XYRange& input, const XYRange& ssRange,
     return 0;
 }
 
+// ---- Multi-file batch statistics -----------------------------------------
+
+static int g_fet_multi_direction = 0;  // 0 = forward (+), 1 = backward (-)
+static int g_fet_hist_bins = 0;        // 0 = auto (sqrt rule)
+
+static bool _fet_vector_stats(const vector& vals, double& mean, double& sd,
+                              double& median, double& vmin, double& vmax)
+{
+    int n = vals.GetSize();
+    if (n < 1)
+        return false;
+
+    double sum = 0;
+    vmin = vals[0];
+    vmax = vals[0];
+    int ii;
+    for (ii = 0; ii < n; ii++)
+    {
+        sum += vals[ii];
+        if (vals[ii] < vmin) vmin = vals[ii];
+        if (vals[ii] > vmax) vmax = vals[ii];
+    }
+    mean = sum / n;
+
+    double squaredSum = 0;
+    for (ii = 0; ii < n; ii++)
+        squaredSum += (vals[ii] - mean) * (vals[ii] - mean);
+    sd = n > 1 ? sqrt(squaredSum / (n - 1)) : 0.0;
+
+    // vector's copy constructor does not compile from a const reference in
+    // Origin C; default-construct and assign instead.
+    vector sorted;
+    sorted = vals;
+    sorted.Sort();
+    median = (n % 2) ? sorted[n / 2]
+                     : 0.5 * (sorted[n / 2 - 1] + sorted[n / 2]);
+    return true;
+}
+
+// Bins a parameter's values and, when the spread allows, samples the matching
+// normal distribution scaled to the histogram (N * binWidth * pdf) so the
+// curve overlays the counts directly.
+static void _fet_stats_histogram(const vector& vals, int requestedBins,
+                                 double mean, double sd,
+                                 vector& centers, vector& counts,
+                                 vector& curveX, vector& curveY)
+{
+    centers.SetSize(0);
+    counts.SetSize(0);
+    curveX.SetSize(0);
+    curveY.SetSize(0);
+
+    int n = vals.GetSize();
+    if (n < 1)
+        return;
+
+    double vmin = vals[0];
+    double vmax = vals[0];
+    int ii;
+    for (ii = 1; ii < n; ii++)
+    {
+        if (vals[ii] < vmin) vmin = vals[ii];
+        if (vals[ii] > vmax) vmax = vals[ii];
+    }
+    if (vmax - vmin <= 0)
+    {
+        double pad = max(fabs(vmax) * 0.05, 1e-12);
+        vmin -= pad;
+        vmax += pad;
+    }
+
+    int bins = requestedBins;
+    if (bins < 1)
+        bins = _fet_clamp_int((int)ceil(sqrt((double)n)), 4, 15);
+    if (bins > 60)
+        bins = 60;
+
+    double width = (vmax - vmin) / bins;
+    centers.SetSize(bins);
+    counts.SetSize(bins);
+    for (ii = 0; ii < bins; ii++)
+    {
+        centers[ii] = vmin + (ii + 0.5) * width;
+        counts[ii] = 0;
+    }
+    for (ii = 0; ii < n; ii++)
+    {
+        int bin = _fet_clamp_int((int)((vals[ii] - vmin) / width), 0, bins - 1);
+        counts[bin] = counts[bin] + 1;
+    }
+
+    if (sd > 0)
+    {
+        int points = 121;
+        double x0 = vmin - width;
+        double x1 = vmax + width;
+        double step = (x1 - x0) / (points - 1);
+        double amplitude = n * width / (sd * 2.5066282746310002);
+        curveX.SetSize(points);
+        curveY.SetSize(points);
+        for (ii = 0; ii < points; ii++)
+        {
+            double x = x0 + step * ii;
+            double z = (x - mean) / sd;
+            curveX[ii] = x;
+            curveY[ii] = amplitude * exp(-0.5 * z * z);
+        }
+    }
+}
+
+static void _fet_style_column_plot(DataPlot& plot, int red, int green, int blue)
+{
+    if (!plot)
+        return;
+    int border = _fet_rgb_color(red, green, blue);
+    int fill = _fet_blend_color(border, SYSCOLOR_WHITE, 0.55);
+
+    // Theme tag naming for column plots differs across Origin versions;
+    // whichever variant validates via UpdateThemeIDs gets applied.
+    Tree patternFormat;
+    patternFormat.Root.Pattern.Border.Color.nVal = border;
+    patternFormat.Root.Pattern.Border.Width.dVal = 1.5;
+    patternFormat.Root.Pattern.Fill.FillColor.nVal = fill;
+    if (0 == plot.UpdateThemeIDs(patternFormat.Root))
+        plot.ApplyFormat(patternFormat, true, true);
+
+    Tree fillFormat;
+    fillFormat.Root.Border.Color.nVal = border;
+    fillFormat.Root.Border.Width.dVal = 1.5;
+    fillFormat.Root.Fill.FillColor.nVal = fill;
+    if (0 == plot.UpdateThemeIDs(fillFormat.Root))
+        plot.ApplyFormat(fillFormat, true, true);
+}
+
+// Fixed name/unit/axis-title metadata for the six batch parameters, shared
+// by the data-computation step and the single-panel renderer so both stay
+// in sync on ordering.
+static void _fet_stats_param_meta(int paramIndex, string& name, string& unit,
+                                  string& axisTitle)
+{
+    vector<string> names = {
+        "SS", "Vth", "gm", "Mobility", "Ion", "log10(Ion/Ioff)"
+    };
+    vector<string> units = {
+        "mV/dec", "V", "uS", "cm^2/(V s)", "uA/um", ""
+    };
+    vector<string> titles = {
+        "SS (mV/dec)",
+        "\\i(V)\\-(th) (V)",
+        "\\i(g)\\-(m) (\\g(m)S)",
+        "\\g(m)\\-(FE) (cm\\+(2)/(V\\x(00B7)s))",
+        "\\i(I)\\-(on) (\\g(m)A/\\g(m)m)",
+        "log\\-(10)(\\i(I)\\-(on)/\\i(I)\\-(off))"
+    };
+    int idx = paramIndex % names.GetSize();
+    if (idx < 0)
+        idx += names.GetSize();
+    name = names[idx];
+    unit = units[idx];
+    axisTitle = titles[idx];
+}
+
+// Maps a 0-7 selection index (used by the scatter and correlation-matrix
+// dialogs) to its column in [FETStatsData]Parameters and a display name.
+// Columns 0/1 (Curve/Segment) are text, not selectable here.
+static void _fet_batch_param_col_name(int paramIndex, int& col, string& name)
+{
+    vector<int> cols = { 2, 4, 6, 7, 8, 9, 10, 11 };
+    vector<string> names = {
+        "SS", "Vth", "gm", "Mobility", "Ion", "Ioff", "Ion/Ioff", "log10(Ion/Ioff)"
+    };
+    int idx = paramIndex % cols.GetSize();
+    if (idx < 0)
+        idx += cols.GetSize();
+    col = cols[idx];
+    name = names[idx];
+}
+
+// Reads paired (x, y) values from two [FETStatsData]Parameters columns,
+// keeping only rows that are real analyzed curves (non-empty Curve name,
+// column 0) with both values present -- skips the blank/NANUM padding rows
+// Origin's minimum-row-count leaves behind, and keeps x/y index-aligned to
+// the same curve.
+static bool _fet_read_batch_param_pair(Worksheet& paramsWks, int colX, int colY,
+                                       vector& outX, vector& outY)
+{
+    outX.SetSize(0);
+    outY.SetSize(0);
+    if (!paramsWks)
+        return false;
+    StringArray curveNames;
+    paramsWks.Columns(0).GetStringArray(curveNames);
+    int rows = paramsWks.GetNumRows();
+    int rr;
+    for (rr = 0; rr < rows; rr++)
+    {
+        string curveName = rr < curveNames.GetSize() ? curveNames[rr] : "";
+        if (curveName.IsEmpty())
+            continue;
+        double xv = paramsWks.Cell(rr, colX);
+        double yv = paramsWks.Cell(rr, colY);
+        if (is_missing_value(xv) || is_missing_value(yv))
+            continue;
+        outX.Add(xv);
+        outY.Add(yv);
+    }
+    return outX.GetSize() > 0;
+}
+
+static double _fet_pearson_correlation(const vector& a, const vector& b)
+{
+    int n = min(a.GetSize(), b.GetSize());
+    if (n < 2)
+        return NANUM;
+    double sumA = 0, sumB = 0;
+    int ii;
+    for (ii = 0; ii < n; ii++)
+    {
+        sumA += a[ii];
+        sumB += b[ii];
+    }
+    double meanA = sumA / n, meanB = sumB / n;
+    double cov = 0, varA = 0, varB = 0;
+    for (ii = 0; ii < n; ii++)
+    {
+        double da = a[ii] - meanA;
+        double db = b[ii] - meanB;
+        cov += da * db;
+        varA += da * da;
+        varB += db * db;
+    }
+    if (varA <= 0 || varB <= 0)
+        return NANUM;
+    return cov / sqrt(varA * varB);
+}
+
+// Computes one parameter's summary stats and histogram bins and writes them
+// into the [FETStatsData]Statistics/Histogram sheets. Pure data -- draws
+// nothing, so switching which parameter is displayed later never needs to
+// re-run curve fitting, only re-read these two sheets.
+static bool _fet_stats_compute(Worksheet& histWks, Worksheet& statsWks,
+                               int paramIndex, LPCSTR paramName, LPCSTR unit,
+                               const vector& vals, int requestedBins)
+{
+    int n = vals.GetSize();
+    double mean = NANUM, sd = NANUM, median = NANUM;
+    double vmin = NANUM, vmax = NANUM;
+    bool haveStats = _fet_vector_stats(vals, mean, sd, median, vmin, vmax);
+
+    if (statsWks)
+    {
+        if (statsWks.GetNumRows() <= paramIndex)
+            statsWks.SetSize(paramIndex + 1, max(statsWks.GetNumCols(), 9));
+        statsWks.SetCell(paramIndex, 0, paramName);
+        statsWks.SetCell(paramIndex, 1, unit);
+        statsWks.SetCell(paramIndex, 2, n);
+        statsWks.SetCell(paramIndex, 3, mean);
+        statsWks.SetCell(paramIndex, 4, sd);
+        statsWks.SetCell(paramIndex, 5, median);
+        statsWks.SetCell(paramIndex, 6, vmin);
+        statsWks.SetCell(paramIndex, 7, vmax);
+        statsWks.SetCell(paramIndex, 8,
+                         haveStats && fabs(mean) > 1e-300
+                             ? 100.0 * sd / fabs(mean) : NANUM);
+    }
+
+    vector centers, counts, curveX, curveY;
+    _fet_stats_histogram(vals, requestedBins, mean, sd,
+                         centers, counts, curveX, curveY);
+    if (!histWks || centers.GetSize() < 1)
+        return false;
+
+    int c0 = paramIndex * 4;
+    int neededRows = max(centers.GetSize(), curveX.GetSize());
+    if (histWks.GetNumRows() < neededRows)
+        histWks.SetSize(neededRows, histWks.GetNumCols());
+    string colName;
+    colName.Format("%s Bin Center", paramName);
+    histWks.Columns(c0).SetLongName(colName);
+    histWks.Columns(c0).SetUnits(unit);
+    histWks.Columns(c0).SetType(OKDATAOBJ_DESIGNATION_X);
+    colName.Format("%s Count", paramName);
+    histWks.Columns(c0 + 1).SetLongName(colName);
+    histWks.Columns(c0 + 1).SetType(OKDATAOBJ_DESIGNATION_Y);
+    colName.Format("%s Fit X", paramName);
+    histWks.Columns(c0 + 2).SetLongName(colName);
+    histWks.Columns(c0 + 2).SetUnits(unit);
+    histWks.Columns(c0 + 2).SetType(OKDATAOBJ_DESIGNATION_X);
+    colName.Format("%s Fit Count", paramName);
+    histWks.Columns(c0 + 3).SetLongName(colName);
+    histWks.Columns(c0 + 3).SetType(OKDATAOBJ_DESIGNATION_Y);
+
+    int ii;
+    for (ii = 0; ii < histWks.GetNumRows(); ii++)
+    {
+        histWks.SetCell(ii, c0, ii < centers.GetSize() ? centers[ii] : NANUM);
+        histWks.SetCell(ii, c0 + 1, ii < counts.GetSize() ? counts[ii] : NANUM);
+        histWks.SetCell(ii, c0 + 2, ii < curveX.GetSize() ? curveX[ii] : NANUM);
+        histWks.SetCell(ii, c0 + 3, ii < curveY.GetSize() ? curveY[ii] : NANUM);
+    }
+    return true;
+}
+
+static int g_fet_stats_current_param = 0;
+
+// Draws exactly ONE parameter's histogram + Gaussian overlay + N/mean/SD
+// label into a SINGLE layer, replacing whatever that layer showed before.
+// This is deliberately not a multi-layer grid: six independently-positioned
+// layers on one page kept rendering as a stale, overlapping mess even though
+// every layer's own geometry read back correct after being set -- a symptom
+// eventually traced to page.width/page.height (a separate, absolute-unit
+// aspect-lock) never being set explicitly, leaving the page a mismatched
+// size for whatever Resize() hint was given. _fet_set_graph_page_ratio now
+// sets both together. A 3-layer graph (see _fet_build_scatter_hist_graph)
+// still needs to add layers -- this is that helper.
+static GraphLayer _fet_graph_add_layer(GraphPage& gp)
+{
+    GraphLayer emptyLayer;
+    if (!gp)
+        return emptyLayer;
+    int before = gp.Layers.Count();
+    int index = gp.AddLayer();
+    if (index < 0 || gp.Layers.Count() <= before)
+    {
+        // Some Origin versions only add graph layers through LabTalk.
+        GraphLayer lastLayer = gp.Layers(before - 1);
+        set_active_layer(lastLayer);
+        LT_execute("layadd type:=normal;");
+        if (gp.Layers.Count() <= before)
+            return emptyLayer;
+        index = gp.Layers.Count() - 1;
+    }
+    return gp.Layers(index);
+}
+
+static bool _fet_render_stats_param(GraphLayer& gl, int paramIndex)
+{
+    if (!gl)
+        return false;
+
+    WorksheetPage statsBook(FET_STATS_DATA_PAGE);
+    if (!statsBook)
+        return false;
+    Worksheet histWks = statsBook.Layers("Histogram");
+    Worksheet statsWks = statsBook.Layers("Statistics");
+    if (!histWks || !statsWks)
+        return false;
+
+    string paramName, unit, axisTitle;
+    _fet_stats_param_meta(paramIndex, paramName, unit, axisTitle);
+
+    int ii;
+    for (ii = gl.DataPlots.Count() - 1; ii >= 0; ii--)
+        gl.RemovePlot(ii);
+
+    int c0 = paramIndex * 4;
+    int rows = histWks.GetNumRows();
+    int red, green, blue;
+    _fet_multi_curve_rgb(paramIndex, red, green, blue);
+
+    DataRange columnRange;
+    columnRange.Add(histWks, c0, "X", c0, 0, rows - 1);
+    columnRange.Add(histWks, c0 + 1, "Y", c0 + 1, 0, rows - 1);
+    int columnIndex = gl.AddPlot(columnRange, IDM_PLOT_COLUMN);
+    DataPlot columnPlot = gl.DataPlots(columnIndex);
+    _fet_style_column_plot(columnPlot, red, green, blue);
+
+    DataRange gaussRange;
+    gaussRange.Add(histWks, c0 + 2, "X", c0 + 2, 0, rows - 1);
+    gaussRange.Add(histWks, c0 + 3, "Y", c0 + 3, 0, rows - 1);
+    int gaussIndex = gl.AddPlot(gaussRange, IDM_PLOT_LINE);
+    DataPlot gaussPlot = gl.DataPlots(gaussIndex);
+    int gaussColor = _fet_blend_color(_fet_rgb_color(red, green, blue),
+                                      SYSCOLOR_BLACK, 0.30);
+    _fet_style_plot(gaussPlot, gaussColor, false, LINE_STYLE_SOLID, 2.0);
+
+    set_active_layer(gl);
+    string script;
+    script  = "layer.x.type=0;layer.y.type=0;";
+    script += "layer.x.grid.show=0;layer.y.grid.show=0;";
+    script += "layer -a;";
+    script += "layer.x.label.pt=11;layer.y.label.pt=11;";
+    gl.LT_execute(script);
+
+    // Override the Y range to the histogram bars' own max count, not
+    // whatever "layer -a" picked considering the Gaussian curve too. A
+    // tightly-clustered parameter's Gaussian amplitude (inversely
+    // proportional to its standard deviation) can be far taller than any
+    // bar, autoscaling the actual bars down to invisible slivers -- this is
+    // very likely why some parameters looked "stuck"/empty when cycling
+    // with [Prev]/[Next] on real device data (which tends to cluster
+    // tightly for some parameters and not others).
+    double maxCount = 0;
+    for (ii = 0; ii < rows; ii++)
+    {
+        double v = histWks.Cell(ii, c0 + 1);
+        if (_fet_valid_number(v) && v > maxCount)
+            maxCount = v;
+    }
+    double yTo = maxCount > 0 ? maxCount * 1.15 : 1.0;
+    string yScript;
+    yScript.Format("layer.y.from=0;layer.y.to=%.15g;", yTo);
+    gl.LT_execute(yScript);
+
+    string titleScript;
+    titleScript.Format("label -xb \"%s\";XB.fsize=12;"
+                       "label -yl \"Count\";YL.fsize=12;", axisTitle);
+    gl.LT_execute(titleScript);
+
+    double n = statsWks.Cell(paramIndex, 2);
+    double mean = statsWks.Cell(paramIndex, 3);
+    double sd = statsWks.Cell(paramIndex, 4);
+    _fet_delete_graph_object(gl, "FET_HIST_STAT");
+    gl.LT_execute("label -p 66 90 -j 0 -n FET_HIST_STAT placeholder;");
+    GraphObject infoLabel = gl.GraphObjects("FET_HIST_STAT");
+    if (infoLabel && !is_missing_value(n))
+    {
+        string info;
+        info.Format("\\i(N) = %d\n\\g(m) = %.4g\n\\g(s) = %.4g",
+                    (int)n, mean, sd);
+        infoLabel.Text = info;
+        gl.LT_execute("FET_HIST_STAT.fsize=11;FET_HIST_STAT.background=0;");
+    }
+
+    string headerText;
+    headerText.Format("Parameter %d / %d: %s", paramIndex + 1,
+                      FET_STATS_PARAM_COUNT, paramName);
+    _fet_delete_graph_object(gl, "FET_STATS_TITLE");
+    gl.LT_execute("label -p 15 97 -j 0 -n FET_STATS_TITLE placeholder;");
+    GraphObject titleLabel = gl.GraphObjects("FET_STATS_TITLE");
+    if (titleLabel)
+    {
+        titleLabel.Text = headerText;
+        gl.LT_execute("FET_STATS_TITLE.fsize=12;FET_STATS_TITLE.background=0;"
+                      "FET_STATS_TITLE.color=color(37,99,235);");
+    }
+
+    // Bottom corners, away from FET_MULTI (top-right, -p 88 97) -- Next used
+    // to sit at that exact same spot and visibly collide with it.
+    _fet_delete_graph_object(gl, "FET_STATS_PREV");
+    gl.LT_execute("label -p 2 3 -j 0 -n FET_STATS_PREV [Prev];");
+    GraphObject prevBtn = gl.GraphObjects("FET_STATS_PREV");
+    if (prevBtn)
+    {
+        prevBtn.Text = "[Prev]";
+        string prevScript;
+        prevScript = "FET_STATS_PREV.fsize=16;FET_STATS_PREV.color=color(37,99,235);"
+                    "FET_STATS_PREV.background=0;FET_STATS_PREV.show=1;"
+                    "FET_STATS_PREV.script$=\"fet_analyzer_stats_prev_param();\";"
+                    "FET_STATS_PREV.script=1;";
+        gl.LT_execute(prevScript);
+    }
+
+    _fet_delete_graph_object(gl, "FET_STATS_NEXT");
+    gl.LT_execute("label -p 88 3 -j 1 -n FET_STATS_NEXT [Next];");
+    GraphObject nextBtn = gl.GraphObjects("FET_STATS_NEXT");
+    if (nextBtn)
+    {
+        nextBtn.Text = "[Next]";
+        string nextScript;
+        nextScript = "FET_STATS_NEXT.fsize=16;FET_STATS_NEXT.color=color(37,99,235);"
+                    "FET_STATS_NEXT.background=0;FET_STATS_NEXT.show=1;"
+                    "FET_STATS_NEXT.script$=\"fet_analyzer_stats_next_param();\";"
+                    "FET_STATS_NEXT.script=1;";
+        gl.LT_execute(nextScript);
+    }
+
+    // Re-assert the same square-page/76%-frame proportions every render:
+    // RemovePlot/AddPlot churn on every parameter switch is cheap insurance
+    // against Origin quietly reflowing the layer back to a smaller default.
+    // 5.00in page (3000 = 5in * 600 units/in), not the original 7.6in.
+    _fet_set_graph_page_ratio(gl, 500, 3000);
+    return true;
+}
+
+// Finds the imported "Curves" workbook a multi-file overlay graph was built
+// from by matching plot dataset names against worksheet-page names (dataset
+// names embed the page name; the longest matching page wins so e.g. "Book1"
+// can't shadow "Book12"). Survives project save/reload, unlike any
+// session-local bookkeeping.
+static WorksheetPage _fet_find_import_book_for_graph(GraphPage& gp)
+{
+    WorksheetPage emptyPage;
+    if (!gp)
+        return emptyPage;
+
+    int ll, pp;
+    for (ll = 0; ll < gp.Layers.Count(); ll++)
+    {
+        GraphLayer gl = gp.Layers(ll);
+        if (!gl)
+            continue;
+        for (pp = 0; pp < gl.DataPlots.Count(); pp++)
+        {
+            DataPlot plot = gl.DataPlots(pp);
+            if (!plot || _fet_is_helper_plot(plot))
+                continue;
+            string dataset = plot.GetDatasetName();
+            dataset.MakeLower();
+
+            WorksheetPage best;
+            int bestLength = 0;
+            WorksheetPage wp;
+            foreach (wp in Project.WorksheetPages)
+            {
+                string pageName = wp.GetName();
+                pageName.MakeLower();
+                if (pageName.IsEmpty() || dataset.Find(pageName) < 0
+                    || pageName.GetLength() <= bestLength)
+                    continue;
+                Worksheet curvesSheet = wp.Layers("Curves");
+                if (!curvesSheet
+                    || curvesSheet.GetNumCols() < FET_IMPORT_COLS_PER_CURVE)
+                    continue;
+                best = wp;
+                bestLength = pageName.GetLength();
+            }
+            if (best)
+                return best;
+        }
+    }
+    return emptyPage;
+}
+
+// Detects whether a Curves sheet uses the compact (Vg/Id only, 2 columns per
+// curve) or full (6 columns per curve) layout. A sheet with fewer than 6
+// columns total can only be compact. Otherwise, column index 2 disambiguates
+// by content: it is curve #2's "Vg" in a compact sheet, or curve #1's "Ig" in
+// a full sheet -- so its long name identifies the layout unambiguously.
+static int _fet_detect_curve_layout(Worksheet& curves)
+{
+    if (!curves)
+        return FET_IMPORT_COLS_PER_CURVE;
+    if (curves.GetNumCols() < FET_IMPORT_COLS_PER_CURVE)
+        return FET_IMPORT_COLS_PER_CURVE_COMPACT;
+    string thirdName = curves.Columns(2).GetLongName();
+    if (thirdName.CompareNoCase("Vg") == 0)
+        return FET_IMPORT_COLS_PER_CURVE_COMPACT;
+    return FET_IMPORT_COLS_PER_CURVE;
+}
+
+// Resolves the Curves workbook multi-curve analysis should read from: the
+// active worksheet if it (or its page) already holds one, otherwise the
+// source workbook behind the active overlay/statistics graph. This is the
+// "start from whatever's already active, not a file prompt" entry point.
+static WorksheetPage _fet_find_multi_source_book()
+{
+    Worksheet activeWks;
+    activeWks = Project.ActiveLayer();
+    if (activeWks)
+    {
+        WorksheetPage wp = activeWks.GetPage();
+        if (wp && wp.Layers("Curves"))
+            return wp;
+    }
+
+    GraphLayer activeGl;
+    activeGl = Project.ActiveLayer();
+    if (activeGl)
+    {
+        // Try the hidden source-book tag first (works for both the overlay
+        // and statistics graphs, neither of which plots the original import
+        // book directly). Fall back to dataset-name matching for graphs
+        // built before this tag existed.
+        string taggedName;
+        if (_fet_read_source_book_tag(activeGl, taggedName))
+        {
+            WorksheetPage tagged(taggedName);
+            if (tagged && tagged.Layers("Curves"))
+                return tagged;
+        }
+        GraphPage gp = activeGl.GetPage();
+        return _fet_find_import_book_for_graph(gp);
+    }
+
+    WorksheetPage emptyPage;
+    return emptyPage;
+}
+
+// Derives a Vg/Id/absId/logAbsId sheet (4 columns per curve, always) from
+// whichever import layout the source Curves sheet uses, purely to feed the
+// overlay graph -- kept separate from the user-facing import table so that
+// table can stay Vg/Id-only in compact mode. Rebuilt on every run, like the
+// other FETGraphData/FETFitData helper sheets in this file.
+static bool _fet_build_multi_graph_data(Worksheet& srcCurves, int colsPerCurve,
+                                        int curveCount, Worksheet& outDerived)
+{
+    if (!srcCurves || curveCount < 1)
+        return false;
+    int rowsTotal = srcCurves.GetNumRows();
+    if (rowsTotal < 1)
+        return false;
+
+    outDerived = _fet_named_page_sheet(FET_STATS_DATA_PAGE, "OverlayCurves",
+                                       curveCount * 4, true);
+    if (!outDerived)
+        return false;
+    outDerived.SetSize(rowsTotal, curveCount * 4);
+
+    int cc;
+    for (cc = 0; cc < curveCount; cc++)
+    {
+        int srcBase = cc * colsPerCurve;
+        int dstBase = cc * 4;
+        string label = srcCurves.Columns(srcBase).GetComments();
+
+        XYRange full;
+        full.Add(srcCurves, srcBase, "X", srcBase, 0, rowsTotal - 1);
+        full.Add(srcCurves, srcBase + 1, "Y", srcBase + 1, 0, rowsTotal - 1);
+        vector vx, vy;
+        _fet_get_xy(full, vx, vy);
+
+        outDerived.Columns(dstBase).SetLongName("Vg");
+        outDerived.Columns(dstBase).SetUnits("V");
+        outDerived.Columns(dstBase).SetType(OKDATAOBJ_DESIGNATION_X);
+        outDerived.Columns(dstBase).SetComments(label);
+        outDerived.Columns(dstBase + 1).SetLongName("Id");
+        outDerived.Columns(dstBase + 1).SetUnits("A");
+        outDerived.Columns(dstBase + 1).SetType(OKDATAOBJ_DESIGNATION_Y);
+        outDerived.Columns(dstBase + 2).SetLongName("absId");
+        outDerived.Columns(dstBase + 2).SetUnits("A");
+        outDerived.Columns(dstBase + 2).SetType(OKDATAOBJ_DESIGNATION_Y);
+        outDerived.Columns(dstBase + 3).SetLongName("logAbsId");
+        outDerived.Columns(dstBase + 3).SetUnits("log10(A)");
+        outDerived.Columns(dstBase + 3).SetType(OKDATAOBJ_DESIGNATION_Y);
+
+        int rr;
+        for (rr = 0; rr < rowsTotal; rr++)
+        {
+            if (rr < vx.GetSize())
+            {
+                double absVal = fabs(vy[rr]);
+                outDerived.SetCell(rr, dstBase, vx[rr]);
+                outDerived.SetCell(rr, dstBase + 1, vy[rr]);
+                outDerived.SetCell(rr, dstBase + 2, absVal);
+                outDerived.SetCell(rr, dstBase + 3,
+                                   absVal > 0 ? log10(absVal) : NANUM);
+            }
+            else
+            {
+                outDerived.SetCell(rr, dstBase, NANUM);
+                outDerived.SetCell(rr, dstBase + 1, NANUM);
+                outDerived.SetCell(rr, dstBase + 2, NANUM);
+                outDerived.SetCell(rr, dstBase + 3, NANUM);
+            }
+        }
+    }
+    outDerived.AutoSize();
+    return true;
+}
+
+// Multi-curve overlay graph: every curve on the log (left) axis uses the
+// same fixed indigo, every curve on the linear (right) axis uses the same
+// fixed amber -- the classic single-curve palette, not a per-curve rainbow.
+// Non-highlighted curves are drawn genuinely translucent (Line.Transparency,
+// verified to round-trip through Origin's format Tree) rather than blended
+// toward white, so hue and axis color stay intact. Only the curve at
+// bestIndex (lowest SS, picked by the caller) is fully opaque and bold. No
+// legend: the highlighted curve plus faded context is the whole point.
+static bool _fet_build_multi_overlay_graph(Worksheet& derived, int curveCount,
+                                           int bestIndex, LPCSTR sourceBookName,
+                                           GraphPage& outGraph)
+{
+    if (!derived || curveCount < 1)
+        return false;
+
+    GraphPage oldGraph(FET_MULTI_OVERLAY_GRAPH_PAGE);
+    if (oldGraph)
+        oldGraph.Destroy();
+
+    FETDialogOptions options;
+    _fet_get_effective_dialog_options(options);
+
+    GraphPage gp;
+    gp.Create("DOUBLEY");
+    gp.SetName(FET_MULTI_OVERLAY_GRAPH_PAGE, OCD_ENUM_NEXT);
+    GraphLayer leftLayer = gp.Layers(0);
+    GraphLayer rightLayer = gp.Layers(1);
+    if (!leftLayer || !rightLayer)
+        return false;
+
+    int rowsTotal = derived.GetNumRows();
+    int cc;
+    for (cc = 0; cc < curveCount; cc++)
+    {
+        int baseCol = cc * 4;
+        bool best = (cc == bestIndex);
+        double lineWidth = best ? 2.5 : 1.0;
+        int transparency = best ? 0 : 65;
+
+        XYRange vgRange;
+        vgRange.Add(derived, baseCol, "X", baseCol, 0, rowsTotal - 1);
+        vgRange.Add(derived, baseCol + 1, "Y", baseCol + 1, 0, rowsTotal - 1);
+        vector vx, vy;
+        if (!_fet_get_xy(vgRange, vx, vy))
+            continue;
+
+        _fet_add_segmented_visible_plots(leftLayer, derived, baseCol,
+                                         baseCol + 3, vx.GetSize(), vx,
+                                         options.logCurveColor, FET_AXIS_LEFT,
+                                         lineWidth, lineWidth, transparency);
+        _fet_add_segmented_visible_plots(rightLayer, derived, baseCol,
+                                         baseCol + 1, vx.GetSize(), vx,
+                                         options.linearCurveColor, FET_AXIS_RIGHT,
+                                         lineWidth, lineWidth, transparency);
+    }
+
+    _fet_configure_transfer_graph(leftLayer);
+    _fet_configure_linear_transfer_graph(rightLayer);
+    _fet_set_y_axis_color(leftLayer, false, options.logCurveColor);
+    _fet_set_y_axis_color(rightLayer, true, options.linearCurveColor);
+    _fet_add_multi_button(leftLayer);
+    _fet_tag_source_book(leftLayer, sourceBookName);
+    gp.SetShow(PAGE_ACTIVATE);
+    set_active_layer(leftLayer);
+    outGraph = gp;
+    return true;
+}
+
+// Unified multi-curve analysis core: batch-extracts parameters from every
+// curve in the source Curves sheet (whichever import layout it uses), builds
+// the [FETStatsData]Parameters/Statistics/Histogram tables and the 2 x 3
+// histogram panel graph, then builds the overlay graph highlighting the
+// lowest-SS curve. Runs both graphs from one call, matching a single "active
+// data in, both graphs out" entry point rather than two separate flows.
+static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
+{
+    summaryText = "";
+    if (!book)
+        return 1;
+    Worksheet curves = book.Layers("Curves");
+    if (!curves)
+        return 1;
+    int colsPerCurve = _fet_detect_curve_layout(curves);
+    int curveCount = curves.GetNumCols() / colsPerCurve;
+    int rowsTotal = curves.GetNumRows();
+    if (curveCount < 1 || rowsTotal < FET_MIN_POINTS)
+        return 2;
+
+    Worksheet derivedCurves;
+    _fet_build_multi_graph_data(curves, colsPerCurve, curveCount, derivedCurves);
+
+    FETDialogOptions options;
+    _fet_get_effective_dialog_options(options);
+    bool backward = g_fet_multi_direction == 1;
+    double densityFactor = options.device.W_um > 0
+                         ? 1.0e6 / options.device.W_um : 1.0e6;
+
+    Worksheet paramWks = _fet_named_page_sheet(FET_STATS_DATA_PAGE,
+                                               "Parameters", 12, true);
+    if (!paramWks)
+        return 1;
+    vector<string> paramColNames = {
+        "Curve", "Segment", "SS", "SS R-Square", "Vth", "Vth R-Square",
+        "gm", "Mobility", "Ion", "Ioff", "Ion/Ioff", "log10(Ion/Ioff)"
+    };
+    vector<string> paramColUnits = {
+        "", "", "mV/dec", "", "V", "", "uS", "cm^2/(V s)",
+        "uA/um", "uA/um", "", ""
+    };
+    int cc;
+    for (cc = 0; cc < paramColNames.GetSize(); cc++)
+    {
+        paramWks.Columns(cc).SetLongName(paramColNames[cc]);
+        paramWks.Columns(cc).SetUnits(paramColUnits[cc]);
+    }
+
+    // The statistics graph is a single layer (see _fet_render_stats_param):
+    // it's created up front so that one layer can host the progress readout
+    // while the (potentially slow) per-curve fitting loop runs, then gets
+    // overwritten with the first parameter's real histogram content
+    // afterward.
+    GraphPage oldStatsGraph(FET_STATS_GRAPH_PAGE);
+    if (oldStatsGraph)
+        oldStatsGraph.Destroy();
+    GraphPage statsGraph;
+    statsGraph.Create("Origin");
+    statsGraph.SetName(FET_STATS_GRAPH_PAGE, OCD_ENUM_NEXT);
+    GraphLayer progressLayer = statsGraph.Layers(0);
+    // Same square-page, 76%-frame proportions as every single-curve graph
+    // (_fet_set_graph_page_ratio), just a 5.00in page (3000 = 5in * 600
+    // units/in) instead of the usual 7.6in -- page.width/height, not just
+    // Resize(), has to change too, or the page stays 7.6in regardless.
+    _fet_set_graph_page_ratio(progressLayer, 500, 3000);
+    statsGraph.SetShow(PAGE_ACTIVATE);
+
+    vector ssVals, vthVals, gmVals, mobVals, ionVals, ratioVals;
+    vector<string> failedCurves;
+    int analyzed = 0;
+    int bestCurveIndex = -1;
+    double bestSS = 1e300;
+    progressBox pb("Analyzing curves...");
+    pb.SetRange(0, curveCount);
+    for (cc = 0; cc < curveCount; cc++)
+    {
+        int baseCol = cc * colsPerCurve;
+        string label = curves.Columns(baseCol).GetComments();
+        if (label.IsEmpty())
+            label.Format("Curve %d", cc + 1);
+        if (!pb.Set(cc))
+            break;  // user clicked Cancel -- keep whatever analyzed so far
+        _fet_update_progress_label(progressLayer, "Analyzing curves", cc + 1,
+                                   curveCount, label);
+        _fet_report_progress_status("Analyzing", cc + 1, curveCount, label);
+
+        XYRange full;
+        full.Add(curves, baseCol, "X", baseCol, 0, rowsTotal - 1);
+        full.Add(curves, baseCol + 1, "Y", baseCol + 1, 0, rowsTotal - 1);
+        vector vx, vy;
+        if (!_fet_get_xy(full, vx, vy))
+        {
+            failedCurves.Add(label);
+            continue;
+        }
+
+        int turnIndex = -1;
+        bool hasBackward = _fet_detect_scan_turn(vx, turnIndex);
+        int segBegin = 0;
+        int segEnd = vx.GetSize() - 1;
+        if (backward)
+        {
+            if (!hasBackward)
+            {
+                failedCurves.Add(label);
+                continue;
+            }
+            segBegin = turnIndex;
+        }
+        else if (hasBackward)
+        {
+            segEnd = turnIndex;
+        }
+
+        FETRangeIndices indices;
+        if (!_fet_auto_pick_segment_indices(vx, vy, segBegin, segEnd,
+                                            backward, indices))
+        {
+            failedCurves.Add(label);
+            continue;
+        }
+
+        // The imported Curves sheet holds only valid Vg/Id pairs from row 0
+        // upward (trailing rows are NANUM and get cleaned), so cleaned-vector
+        // indices map 1:1 onto worksheet rows here.
+        XYRange input, ssRange, vthRange;
+        input.Add(curves, baseCol, "X", baseCol, segBegin, segEnd);
+        input.Add(curves, baseCol + 1, "Y", baseCol + 1, segBegin, segEnd);
+        ssRange.Add(curves, baseCol, "X", baseCol,
+                    indices.ssBegin, indices.ssEnd);
+        ssRange.Add(curves, baseCol + 1, "Y", baseCol + 1,
+                    indices.ssBegin, indices.ssEnd);
+        vthRange.Add(curves, baseCol, "X", baseCol,
+                     indices.vthBegin, indices.vthEnd);
+        vthRange.Add(curves, baseCol + 1, "Y", baseCol + 1,
+                     indices.vthBegin, indices.vthEnd);
+
+        FETResult result;
+        if (0 != _fet_analyze(input, ssRange, vthRange, options.device,
+                              false, false, result))
+        {
+            failedCurves.Add(label);
+            continue;
+        }
+
+        int row = analyzed;
+        if (paramWks.GetNumRows() <= row)
+            paramWks.SetSize(row + 1, max(paramWks.GetNumCols(), 12));
+        double gm_uS = result.gm_S * 1.0e6;
+        double ionDensity = result.ion_A * densityFactor;
+        double ioffDensity = result.ioff_A * densityFactor;
+        double ratioLog = result.ion_ioff > 0 ? log10(result.ion_ioff) : NANUM;
+        paramWks.SetCell(row, 0, label);
+        paramWks.SetCell(row, 1, backward ? "-" : "+");
+        paramWks.SetCell(row, 2, result.ss_mV_dec);
+        paramWks.SetCell(row, 3, result.ss_r2);
+        paramWks.SetCell(row, 4, result.vth_V);
+        paramWks.SetCell(row, 5, result.vth_r2);
+        paramWks.SetCell(row, 6, gm_uS);
+        paramWks.SetCell(row, 7, result.mobility_cm2_Vs);
+        paramWks.SetCell(row, 8, ionDensity);
+        paramWks.SetCell(row, 9, ioffDensity);
+        paramWks.SetCell(row, 10, result.ion_ioff);
+        paramWks.SetCell(row, 11, ratioLog);
+
+        ssVals.Add(result.ss_mV_dec);
+        vthVals.Add(result.vth_V);
+        gmVals.Add(gm_uS);
+        mobVals.Add(result.mobility_cm2_Vs);
+        ionVals.Add(ionDensity);
+        if (_fet_valid_number(ratioLog))
+            ratioVals.Add(ratioLog);
+        if (result.ss_mV_dec < bestSS)
+        {
+            bestSS = result.ss_mV_dec;
+            bestCurveIndex = cc;
+        }
+        analyzed++;
+    }
+    pb.Set(curveCount);
+    _fet_remove_progress_label(progressLayer);
+    LT_execute("type -s \"Analysis complete.\";");
+
+    // SetSize(0, ...) cannot shrink below Origin's minimum row count, so a
+    // re-run over fewer curves would otherwise leave the previous run's
+    // rows visible below the fresh ones.
+    int staleRow, staleCol;
+    for (staleRow = analyzed; staleRow < paramWks.GetNumRows(); staleRow++)
+    {
+        paramWks.SetCell(staleRow, 0, "");
+        paramWks.SetCell(staleRow, 1, "");
+        for (staleCol = 2; staleCol < 12; staleCol++)
+            paramWks.SetCell(staleRow, staleCol, NANUM);
+    }
+    paramWks.AutoSize();
+
+    string bookName = book.GetName();
+    GraphPage overlayGraph;
+    bool overlayBuilt = derivedCurves
+        && _fet_build_multi_overlay_graph(derivedCurves, curveCount,
+                                          bestCurveIndex, bookName,
+                                          overlayGraph);
+
+    if (analyzed < 1)
+    {
+        summaryText.Format(
+            "No curve could be analyzed with the current fitting settings "
+            "[%s segment]. Try a larger smoothing window or a lower minimum "
+            "R-Square.%s",
+            backward ? "backward" : "forward",
+            overlayBuilt ? "\n\nThe overlay graph was still built." : "");
+        return overlayBuilt ? 5 : 3;
+    }
+
+    Worksheet statsWks = _fet_named_page_sheet(FET_STATS_DATA_PAGE,
+                                               "Statistics", 9, true);
+    Worksheet histWks = _fet_named_page_sheet(FET_STATS_DATA_PAGE,
+                                              "Histogram",
+                                              FET_STATS_PARAM_COUNT * 4, true);
+    if (!statsWks || !histWks)
+        return 4;
+    vector<string> statsColNames = {
+        "Parameter", "Unit", "N", "Mean", "SD", "Median", "Min", "Max", "CV"
+    };
+    for (cc = 0; cc < statsColNames.GetSize(); cc++)
+    {
+        statsWks.Columns(cc).SetLongName(statsColNames[cc]);
+        statsWks.Columns(cc).SetUnits(cc == 8 ? "%" : "");
+    }
+
+    int pp;
+    for (pp = 0; pp < FET_STATS_PARAM_COUNT; pp++)
+    {
+        vector vals;
+        if (pp == 0) vals = ssVals;
+        else if (pp == 1) vals = vthVals;
+        else if (pp == 2) vals = gmVals;
+        else if (pp == 3) vals = mobVals;
+        else if (pp == 4) vals = ionVals;
+        else vals = ratioVals;
+
+        string paramName, paramUnit, axisTitle;
+        _fet_stats_param_meta(pp, paramName, paramUnit, axisTitle);
+        _fet_stats_compute(histWks, statsWks, pp, paramName, paramUnit, vals,
+                          g_fet_hist_bins);
+    }
+    statsWks.AutoSize();
+    histWks.AutoSize();
+
+    // One layer, showing one parameter at a time (see _fet_render_stats_param
+    // for why this replaced an earlier six-layer-per-page grid). Starts on
+    // whichever parameter the settings dialog's "Show parameter" picked
+    // (default SS, index 0, for a first-ever run).
+    if (g_fet_stats_current_param < 0 || g_fet_stats_current_param >= FET_STATS_PARAM_COUNT)
+        g_fet_stats_current_param = 0;
+    GraphLayer statsLayer = statsGraph.Layers(0);
+    _fet_render_stats_param(statsLayer, g_fet_stats_current_param);
+    _fet_add_multi_button(statsLayer);
+    _fet_tag_source_book(statsLayer, bookName);
+    set_active_layer(statsLayer);
+    statsGraph.Refresh();
+
+    string statsPageName = paramWks.GetPage().GetName();
+    string statsGraphName = statsGraph.GetName();
+    string overlayGraphName = "";
+    if (overlayBuilt)
+        overlayGraphName = overlayGraph.GetName();
+    string bestSuffix = "";
+    if (bestCurveIndex >= 0)
+    {
+        string bestLabel;
+        bestLabel = curves.Columns(bestCurveIndex * colsPerCurve).GetComments();
+        bestSuffix.Format(" (highlighted: lowest SS = %s)", bestLabel);
+    }
+    summaryText.Format(
+        "Analyzed %d of %d curve(s) [%s segment].\n\n"
+        "Overlay graph: \"%s\"%s\n"
+        "Distribution histograms: graph \"%s\"\n"
+        "Parameter table: [%s]Parameters\n"
+        "Statistics summary: [%s]Statistics",
+        analyzed, curveCount, backward ? "backward" : "forward",
+        overlayGraphName, bestSuffix,
+        statsGraphName, statsPageName, statsPageName);
+    if (failedCurves.GetSize() > 0)
+    {
+        summaryText += "\n\nSkipped curves:";
+        for (cc = 0; cc < failedCurves.GetSize() && cc < 8; cc++)
+        {
+            summaryText += "\n  ";
+            summaryText += failedCurves[cc];
+        }
+        if (failedCurves.GetSize() > 8)
+            summaryText += "\n  ...";
+    }
+    return 0;
+}
+
+// Fitting-parameter settings for multi-curve analysis. Shares the
+// device/extraction options with the single-curve settings dialog (so tuning
+// them in one place tunes both) and adds the analyzed sweep segment and the
+// histogram bin count.
+static bool _fet_get_multi_options(LPCSTR title = "FET Multi-Curve Analysis")
+{
+    FETDialogOptions options;
+    _fet_get_effective_dialog_options(options);
+
+    GETN_BOX(settings)
+    GETN_BEGIN_BRANCH(device, "Device Parameters") GETN_OPTION_BRANCH(GETNBRANCH_OPEN)
+        GETN_NUM(L_um, "Channel Length L (um)", options.device.L_um)
+        GETN_NUM(W_um, "Channel Width W (um)", options.device.W_um)
+        GETN_LIST(CoxMode, "Cox input", options.device.coxMode, "Manual Cox|HfOx|AlOx|SiOx|Manual kappa")
+        GETN_NUM(OxideThickness, "Oxide thickness (nm)", options.device.oxideThickness_nm)
+        GETN_NUM(Kappa, "Manual kappa", options.device.oxideKappa)
+        GETN_NUM(Cox, "Manual Cox (F/cm^2)", options.device.Cox_F_cm2)
+        GETN_NUM(Vd, "Drain Voltage Vd (V)", options.device.Vd_V)
+    GETN_END_BRANCH(device)
+    GETN_BEGIN_BRANCH(extract, "Fitting") GETN_OPTION_BRANCH(GETNBRANCH_OPEN)
+        GETN_LIST(Direction, "Analyzed segment", g_fet_multi_direction, "Forward (+)|Backward (-)")
+        GETN_NUM(SmoothingWindow, "Smoothing window (odd points)", options.smoothingWindow)
+        GETN_NUM(SSWindowPoints, "Automatic SS window (0 = auto)", options.ssWindowPoints)
+        GETN_NUM(VthWindowPoints, "Automatic Vth window (0 = auto)", options.vthWindowPoints)
+        GETN_NUM(MinFitR2, "Minimum automatic fit R-Square", options.minFitR2)
+    GETN_END_BRANCH(extract)
+    GETN_BEGIN_BRANCH(stats, "Statistics")
+        GETN_NUM(Bins, "Histogram bins (0 = auto)", g_fet_hist_bins)
+        GETN_LIST(ShowParam, "Show parameter", g_fet_stats_current_param, "SS|Vth|gm|Mobility|Ion|log10(Ion/Ioff)")
+    GETN_END_BRANCH(stats)
+
+    settings.device.OxideThickness.Enable =
+        options.device.coxMode == FET_COX_DIRECT ? 0 : 1;
+    settings.device.Kappa.Enable =
+        options.device.coxMode == FET_COX_MANUAL_KAPPA ? 1 : 0;
+    settings.device.Cox.Enable =
+        options.device.coxMode == FET_COX_DIRECT ? 1 : 0;
+
+    if (!GetNBox(settings, title))
+        return false;
+
+    options.device.L_um = settings.device.L_um.dVal;
+    options.device.W_um = settings.device.W_um.dVal;
+    options.device.coxMode = settings.device.CoxMode.nVal;
+    options.device.oxideThickness_nm = settings.device.OxideThickness.dVal;
+    options.device.oxideKappa = settings.device.Kappa.dVal;
+    options.device.Cox_F_cm2 = settings.device.Cox.dVal;
+    options.device.Vd_V = settings.device.Vd.dVal;
+    options.smoothingWindow = (int)settings.extract.SmoothingWindow.dVal;
+    options.ssWindowPoints = (int)settings.extract.SSWindowPoints.dVal;
+    options.vthWindowPoints = (int)settings.extract.VthWindowPoints.dVal;
+    options.minFitR2 = settings.extract.MinFitR2.dVal;
+    if (options.smoothingWindow < 1)
+        options.smoothingWindow = 1;
+    if (options.smoothingWindow % 2 == 0)
+        options.smoothingWindow++;
+    if (options.ssWindowPoints < 0)
+        options.ssWindowPoints = 0;
+    if (options.vthWindowPoints < 0)
+        options.vthWindowPoints = 0;
+    if (options.minFitR2 < 0)
+        options.minFitR2 = 0;
+    if (options.minFitR2 > 1)
+        options.minFitR2 = 1;
+
+    g_fet_multi_direction = settings.extract.Direction.nVal == 1 ? 1 : 0;
+    g_fet_hist_bins = (int)settings.stats.Bins.dVal;
+    if (g_fet_hist_bins < 0)
+        g_fet_hist_bins = 0;
+    if (g_fet_hist_bins > 60)
+        g_fet_hist_bins = 60;
+    g_fet_stats_current_param = settings.stats.ShowParam.nVal;
+
+    g_fet_dialog_options = options;
+    g_fet_dialog_options_initialized = true;
+    return true;
+}
+
+// ---- Scatter + marginal histograms and correlation matrix ----------------
+//
+// Both read from an already-computed [FETStatsData]Parameters table (i.e.
+// multi-curve analysis must have run at least once) rather than re-fitting
+// curves, since they're cross-parameter analyses over results that already
+// exist.
+
+static int g_fet_scatter_x_param = 4;  // Ion
+static int g_fet_scatter_y_param = 0;  // SS
+
+static bool _fet_get_scatter_options()
+{
+    GETN_BOX(settings)
+    GETN_LIST(XParam, "X-axis parameter", g_fet_scatter_x_param, "SS|Vth|gm|Mobility|Ion|Ioff|Ion/Ioff|log10(Ion/Ioff)")
+    GETN_LIST(YParam, "Y-axis parameter", g_fet_scatter_y_param, "SS|Vth|gm|Mobility|Ion|Ioff|Ion/Ioff|log10(Ion/Ioff)")
+    if (!GetNBox(settings, "FET Scatter + Histograms"))
+        return false;
+    g_fet_scatter_x_param = settings.XParam.nVal;
+    g_fet_scatter_y_param = settings.YParam.nVal;
+    return true;
+}
+
+// Builds a 3-layer graph: a main scatter (bottom-left) plus one marginal
+// histogram along each axis (top for X, right for Y), both aligned to the
+// main layer's own autoscaled range so the three visually line up. Bars use
+// the already-proven IDM_PLOT_COLUMN/IDM_PLOT_BAR types (Column for
+// vertical, Bar for horizontal), matching the histogram styling already
+// used by the statistics graph.
+static bool _fet_string_list_contains(const vector<string>& names, LPCSTR s)
+{
+    int ii;
+    for (ii = 0; ii < names.GetSize(); ii++)
+        if (names[ii].CompareNoCase(s) == 0)
+            return true;
+    return false;
+}
+
+// Snapshots the names of all current GraphPages, for use with
+// _fet_pick_new_graph_page below. Needed because neither LT_execute()'s own
+// return value NOR Project.ActiveLayer() reliably indicates whether an
+// X-Function (plot_marginal/plotmatrix) actually built the graph we asked
+// for: headless testing this session showed LT_execute() can return FALSE
+// even when a correct multi-layer graph was built, AND return TRUE while
+// only producing junk single-layer pages -- so the only trustworthy check
+// is to look at what pages actually exist before/after and inspect their
+// shape directly.
+static void _fet_snapshot_graph_page_names(vector<string>& names)
+{
+    names.SetSize(0);
+    GraphPage gp;
+    foreach (gp in Project.GraphPages)
+        names.Add(gp.GetName());
+}
+
+// Finds the best-shaped GraphPage created since `before` was snapshotted
+// (highest Layers.Count()), destroys every OTHER newly-created page (so a
+// failed/degenerate X-Function attempt -- e.g. plotmatrix silently emitting
+// several throwaway single-layer pages instead of one real matrix grid,
+// confirmed via headless probing -- doesn't leave clutter behind), and
+// returns whether the best candidate meets minLayers. On failure, ALL new
+// pages are destroyed and false is returned.
+static bool _fet_pick_new_graph_page(const vector<string>& before, int minLayers,
+                                     string& graphName)
+{
+    graphName = "";
+    vector<string> newNames;
+    string bestName;
+    int bestLayers = -1;
+    GraphPage gp;
+    foreach (gp in Project.GraphPages)
+    {
+        if (_fet_string_list_contains(before, gp.GetName()))
+            continue;
+        newNames.Add(gp.GetName());
+        int lc = gp.Layers.Count();
+        if (lc > bestLayers)
+        {
+            bestLayers = lc;
+            bestName = gp.GetName();
+        }
+    }
+    bool ok = bestLayers >= minLayers;
+    int ii;
+    for (ii = 0; ii < newNames.GetSize(); ii++)
+    {
+        if (ok && newNames[ii].CompareNoCase(bestName) == 0)
+            continue; // keep the winner
+        GraphPage toKill(newNames[ii]);
+        if (toKill)
+            toKill.Destroy();
+    }
+    if (!ok)
+        return false;
+    graphName = bestName;
+    return true;
+}
+
+// Renames whatever auto-generated page name an X-Function chose (e.g.
+// "Graph3") to a fixed, predictable page name, destroying any stale page
+// already occupying that name first -- so downstream code (the [FET Multi]
+// re-run button's source-book tag lookup, re-running the same
+// scatter/correlation operation twice, and tests) can find "the" scatter or
+// correlation graph by a fixed name regardless of whether the native
+// template or the hand-built fallback produced it.
+static void _fet_rename_graph_page_to(string& graphName, LPCSTR fixedName)
+{
+    if (graphName.CompareNoCase(fixedName) == 0)
+        return;
+    GraphPage target(graphName);
+    if (!target)
+        return;
+    GraphPage stale(fixedName);
+    if (stale && stale.GetName().CompareNoCase(graphName) != 0)
+        stale.Destroy();
+    target.SetName(fixedName, OCD_ENUM_NEXT);
+    graphName = target.GetName();
+}
+
+// Tries Origin's built-in "Marginal Histograms" graph -- the plot_marginal
+// X-Function, the same template reachable from Origin's own graph gallery --
+// before falling back to a hand-built 3-layer graph. Confirmed via headless
+// probing this session that plot_marginal CAN build a correct 3-layer
+// marginal-histogram graph even while LT_execute() itself reports failure,
+// so success/failure here is judged purely by what page shows up afterward
+// (a real marginal-histogram graph needs a main layer plus 2 margins = 3
+// layers), not by LT_execute()'s return value.
+// srcWks must be a plain 2-column (X, Y) worksheet.
+static bool _fet_try_native_marginal_plot(Worksheet& srcWks, string& graphName)
+{
+    graphName = "";
+    if (!srcWks)
+        return false;
+    string bookName = srcWks.GetPage().GetName();
+    string wksName = srcWks.GetName();
+    vector<string> before;
+    _fet_snapshot_graph_page_names(before);
+    string script;
+    script.Format("plot_marginal iy:=[%s]%s!(1,2) type:=0 top:=0 right:=0;",
+                  bookName, wksName);
+    LT_execute(script);
+    return _fet_pick_new_graph_page(before, 3, graphName);
+}
+
+// Hand-built 3-layer fallback: a main scatter (bottom-left) plus one
+// marginal histogram along each axis (top for X, right for Y), both aligned
+// to the main layer's own autoscaled range so the three visually line up.
+// Bars use the already-proven IDM_PLOT_COLUMN/IDM_PLOT_BAR types.
+static bool _fet_build_scatter_hist_graph_fallback(Worksheet& derived,
+                                                    const vector& vx,
+                                                    const vector& vy,
+                                                    LPCSTR nameX, LPCSTR nameY,
+                                                    int rows, string& summaryText)
+{
+    double meanX = NANUM, sdX = NANUM, medianX = NANUM, minX = NANUM, maxX = NANUM;
+    _fet_vector_stats(vx, meanX, sdX, medianX, minX, maxX);
+    double meanY = NANUM, sdY = NANUM, medianY = NANUM, minY = NANUM, maxY = NANUM;
+    _fet_vector_stats(vy, meanY, sdY, medianY, minY, maxY);
+
+    vector centersX, countsX, curveXX, curveYX;
+    _fet_stats_histogram(vx, 0, meanX, sdX, centersX, countsX, curveXX, curveYX);
+    vector centersY, countsY, curveXY, curveYY;
+    _fet_stats_histogram(vy, 0, meanY, sdY, centersY, countsY, curveXY, curveYY);
+
+    int histRows = max(centersX.GetSize(), centersY.GetSize());
+    if (derived.GetNumCols() < 6 || derived.GetNumRows() < histRows)
+        derived.SetSize(max(rows, histRows), 6);
+    derived.Columns(2).SetLongName("X Bin Center");
+    derived.Columns(2).SetType(OKDATAOBJ_DESIGNATION_X);
+    derived.Columns(3).SetLongName("X Bin Count");
+    derived.Columns(3).SetType(OKDATAOBJ_DESIGNATION_Y);
+    derived.Columns(4).SetLongName("Y Bin Count");
+    derived.Columns(4).SetType(OKDATAOBJ_DESIGNATION_X);
+    derived.Columns(5).SetLongName("Y Bin Center");
+    derived.Columns(5).SetType(OKDATAOBJ_DESIGNATION_Y);
+
+    int ii;
+    for (ii = 0; ii < derived.GetNumRows(); ii++)
+    {
+        derived.SetCell(ii, 2, ii < centersX.GetSize() ? centersX[ii] : NANUM);
+        derived.SetCell(ii, 3, ii < countsX.GetSize() ? countsX[ii] : NANUM);
+        derived.SetCell(ii, 4, ii < countsY.GetSize() ? countsY[ii] : NANUM);
+        derived.SetCell(ii, 5, ii < centersY.GetSize() ? centersY[ii] : NANUM);
+    }
+    derived.AutoSize();
+
+    FETDialogOptions options;
+    _fet_get_effective_dialog_options(options);
+    COLORREF markerRgb = okutil_convert_ocolor_to_RGB(options.markerColor);
+    int markerRed = GetRValue(markerRgb);
+    int markerGreen = GetGValue(markerRgb);
+    int markerBlue = GetBValue(markerRgb);
+
+    GraphPage oldGraph(FET_SCATTER_GRAPH_PAGE);
+    if (oldGraph)
+        oldGraph.Destroy();
+    GraphPage gp;
+    gp.Create("Origin");
+    gp.SetName(FET_SCATTER_GRAPH_PAGE, OCD_ENUM_NEXT);
+    GraphLayer mainLayer = gp.Layers(0);
+    if (!mainLayer)
+        return false;
+    _fet_set_graph_page_ratio(mainLayer, 500, 3600);
+
+    set_active_layer(mainLayer);
+    mainLayer.LT_execute("layer.unit=0;layer.left=16;layer.top=15;layer.width=60;layer.height=60;");
+
+    DataRange scatterRange;
+    scatterRange.Add(derived, 0, "X", 0, 0, rows - 1);
+    scatterRange.Add(derived, 1, "Y", 1, 0, rows - 1);
+    int scatterIndex = mainLayer.AddPlot(scatterRange, IDM_PLOT_SCATTER);
+    DataPlot scatterPlot = mainLayer.DataPlots(scatterIndex);
+    _fet_style_plot(scatterPlot, options.logCurveColor, true);
+
+    string mainScript;
+    mainScript.Format("layer -a;layer.x.grid.show=0;layer.y.grid.show=0;"
+                      "label -xb \"%s\";label -yl \"%s\";"
+                      "XB.fsize=12;YL.fsize=12;layer.x.label.pt=10;layer.y.label.pt=10;",
+                      nameX, nameY);
+    mainLayer.LT_execute(mainScript);
+
+    mainLayer.LT_execute("__FET_SCX_FROM=layer.x.from;__FET_SCX_TO=layer.x.to;"
+                         "__FET_SCY_FROM=layer.y.from;__FET_SCY_TO=layer.y.to;");
+    double xFrom = 0, xTo = 0, yFrom = 0, yTo = 0;
+    LT_get_var("__FET_SCX_FROM", &xFrom);
+    LT_get_var("__FET_SCX_TO", &xTo);
+    LT_get_var("__FET_SCY_FROM", &yFrom);
+    LT_get_var("__FET_SCY_TO", &yTo);
+
+    GraphLayer topLayer = _fet_graph_add_layer(gp);
+    if (topLayer)
+    {
+        set_active_layer(topLayer);
+        topLayer.LT_execute("layer.unit=0;layer.left=16;layer.top=78;layer.width=60;layer.height=16;");
+        DataRange topRange;
+        topRange.Add(derived, 2, "X", 2, 0, centersX.GetSize() - 1);
+        topRange.Add(derived, 3, "Y", 3, 0, centersX.GetSize() - 1);
+        int topIndex = topLayer.AddPlot(topRange, IDM_PLOT_COLUMN);
+        DataPlot topPlot = topLayer.DataPlots(topIndex);
+        _fet_style_column_plot(topPlot, markerRed, markerGreen, markerBlue);
+        string topScript;
+        topScript.Format("layer.x.from=%.15g;layer.x.to=%.15g;layer -a;"
+                         "layer.x.from=%.15g;layer.x.to=%.15g;"
+                         "layer.x.showAxes=0;layer.y.showAxes=1;"
+                         "layer.x.grid.show=0;layer.y.grid.show=0;"
+                         "label -yl \"Count\";YL.fsize=10;",
+                         xFrom, xTo, xFrom, xTo);
+        topLayer.LT_execute(topScript);
+    }
+
+    GraphLayer rightLayer = _fet_graph_add_layer(gp);
+    if (rightLayer)
+    {
+        set_active_layer(rightLayer);
+        rightLayer.LT_execute("layer.unit=0;layer.left=78;layer.top=15;layer.width=16;layer.height=60;");
+        DataRange rightRange;
+        rightRange.Add(derived, 4, "X", 4, 0, centersY.GetSize() - 1);
+        rightRange.Add(derived, 5, "Y", 5, 0, centersY.GetSize() - 1);
+        int rightIndex = rightLayer.AddPlot(rightRange, IDM_PLOT_BAR);
+        DataPlot rightPlot = rightLayer.DataPlots(rightIndex);
+        _fet_style_column_plot(rightPlot, markerRed, markerGreen, markerBlue);
+        string rightScript;
+        rightScript.Format("layer.y.from=%.15g;layer.y.to=%.15g;layer -a;"
+                           "layer.y.from=%.15g;layer.y.to=%.15g;"
+                           "layer.y.showAxes=0;layer.x.showAxes=1;"
+                           "layer.x.grid.show=0;layer.y.grid.show=0;"
+                           "label -xb \"Count\";XB.fsize=10;",
+                           yFrom, yTo, yFrom, yTo);
+        rightLayer.LT_execute(rightScript);
+    }
+
+    gp.SetShow(PAGE_ACTIVATE);
+    set_active_layer(mainLayer);
+
+    string graphName = gp.GetName();
+    summaryText.Format("Scatter + marginal histograms: \"%s\" (N = %d).\n\n"
+                       "X: %s   Y: %s",
+                       graphName, rows, nameX, nameY);
+    return true;
+}
+
+static bool _fet_build_scatter_hist_graph(int xParamIdx, int yParamIdx,
+                                          string& summaryText)
+{
+    summaryText = "";
+    WorksheetPage statsBook(FET_STATS_DATA_PAGE);
+    if (!statsBook)
+        return false;
+    Worksheet paramsWks = statsBook.Layers("Parameters");
+    if (!paramsWks)
+        return false;
+
+    int colX, colY;
+    string nameX, nameY;
+    _fet_batch_param_col_name(xParamIdx, colX, nameX);
+    _fet_batch_param_col_name(yParamIdx, colY, nameY);
+
+    vector vx, vy;
+    if (!_fet_read_batch_param_pair(paramsWks, colX, colY, vx, vy) || vx.GetSize() < 2)
+        return false;
+    int rows = vx.GetSize();
+
+    Worksheet derived = _fet_named_page_sheet(FET_SCATTER_DATA_PAGE, "Data", 6, true);
+    if (!derived)
+        return false;
+    derived.SetSize(rows, 6);
+    derived.Columns(0).SetLongName(nameX);
+    derived.Columns(0).SetType(OKDATAOBJ_DESIGNATION_X);
+    derived.Columns(1).SetLongName(nameY);
+    derived.Columns(1).SetType(OKDATAOBJ_DESIGNATION_Y);
+    int ii;
+    for (ii = 0; ii < rows; ii++)
+    {
+        derived.SetCell(ii, 0, vx[ii]);
+        derived.SetCell(ii, 1, vy[ii]);
+    }
+    derived.AutoSize();
+
+    string graphName;
+    if (_fet_try_native_marginal_plot(derived, graphName))
+    {
+        _fet_rename_graph_page_to(graphName, FET_SCATTER_GRAPH_PAGE);
+        summaryText.Format(
+            "Scatter + marginal histograms (Origin's native Marginal "
+            "Histograms template): \"%s\" (N = %d).\n\nX: %s   Y: %s",
+            graphName, rows, nameX, nameY);
+        return true;
+    }
+
+    return _fet_build_scatter_hist_graph_fallback(derived, vx, vy, nameX, nameY,
+                                                  rows, summaryText);
+}
+
+static bool _fet_get_correlation_options(vector<int>& selected)
+{
+    bool checkSS = true, checkVth = true, checkGm = false, checkMob = true,
+         checkIon = true, checkIoff = false, checkRatio = false, checkLogRatio = true;
+
+    GETN_BOX(settings)
+    GETN_CHECK(SS, "SS", checkSS)
+    GETN_CHECK(Vth, "Vth", checkVth)
+    GETN_CHECK(Gm, "gm", checkGm)
+    GETN_CHECK(Mobility, "Mobility", checkMob)
+    GETN_CHECK(Ion, "Ion", checkIon)
+    GETN_CHECK(Ioff, "Ioff", checkIoff)
+    GETN_CHECK(Ratio, "Ion/Ioff", checkRatio)
+    GETN_CHECK(LogRatio, "log10(Ion/Ioff)", checkLogRatio)
+    if (!GetNBox(settings, "FET Correlation Matrix"))
+        return false;
+
+    selected.SetSize(0);
+    if (settings.SS.nVal) selected.Add(0);
+    if (settings.Vth.nVal) selected.Add(1);
+    if (settings.Gm.nVal) selected.Add(2);
+    if (settings.Mobility.nVal) selected.Add(3);
+    if (settings.Ion.nVal) selected.Add(4);
+    if (settings.Ioff.nVal) selected.Add(5);
+    if (settings.Ratio.nVal) selected.Add(6);
+    if (settings.LogRatio.nVal) selected.Add(7);
+    return true;
+}
+
+// Pairwise Pearson correlation over the selected parameters, written as a
+// plain coefficient table (not a colored heatmap image -- Origin C's
+// worksheet cell/conditional-formatting API isn't exercised anywhere else
+// in this file, so a table using only already-proven cell-write calls was
+// the safer deliverable here).
+// Tries Origin's built-in Scatter Matrix graph -- the plotmatrix X-Function,
+// reachable from the same gallery as "Correlation Plot" -- before falling
+// back to a hand-computed coefficient table. Headless probing this session
+// showed a failed/degenerate plotmatrix call can still report LT_execute()
+// success while actually emitting several throwaway single-layer pages
+// instead of one real matrix grid, so (as with _fet_try_native_marginal_plot)
+// success is judged by the shape of whatever page(s) appear afterward, not
+// by LT_execute()'s return value: a real scatter-matrix grid for M selected
+// parameters needs well more than one layer, so require at least M layers
+// as a conservative floor. irng accepts non-contiguous column numbers
+// directly (`(2,3,5)`-style), so this reads straight from
+// [FETStatsData]Parameters, no derived worksheet needed.
+static bool _fet_try_native_scatter_matrix(Worksheet& paramsWks,
+                                           const vector<int>& selected,
+                                           string& graphName)
+{
+    graphName = "";
+    if (!paramsWks)
+        return false;
+    string bookName = paramsWks.GetPage().GetName();
+    string wksName = paramsWks.GetName();
+
+    string colList;
+    int ii;
+    for (ii = 0; ii < selected.GetSize(); ii++)
+    {
+        int col;
+        string name;
+        _fet_batch_param_col_name(selected[ii], col, name);
+        string token;
+        if (ii == 0)
+            token.Format("%d", col + 1);
+        else
+            token.Format(",%d", col + 1);
+        colList += token;
+    }
+
+    vector<string> before;
+    _fet_snapshot_graph_page_names(before);
+    string script;
+    script.Format("plotmatrix irng:=[%s]%s!(%s) ellipse:=1 fit:=1;",
+                  bookName, wksName, colList);
+    LT_execute(script);
+    int minLayers = selected.GetSize() > 2 ? selected.GetSize() : 2;
+    return _fet_pick_new_graph_page(before, minLayers, graphName);
+}
+
+static int _fet_build_correlation_matrix(const vector<int>& selected,
+                                         string& summaryText)
+{
+    summaryText = "";
+    WorksheetPage statsBook(FET_STATS_DATA_PAGE);
+    if (!statsBook)
+        return 1;
+    Worksheet paramsWks = statsBook.Layers("Parameters");
+    if (!paramsWks)
+        return 1;
+
+    int m = selected.GetSize();
+    if (m < 2)
+        return 2;
+
+    string nativeGraphName;
+    if (_fet_try_native_scatter_matrix(paramsWks, selected, nativeGraphName))
+    {
+        _fet_rename_graph_page_to(nativeGraphName, FET_CORRELATION_GRAPH_PAGE);
+        summaryText.Format(
+            "Correlation matrix (Origin's native Scatter Matrix template): "
+            "\"%s\" (%d parameters).", nativeGraphName, m);
+        return 0;
+    }
+
+    Worksheet outWks = _fet_named_page_sheet(FET_STATS_DATA_PAGE, "Correlation",
+                                             m + 1, true);
+    if (!outWks)
+        return 3;
+    outWks.SetSize(m, m + 1);
+    outWks.Columns(0).SetLongName("Parameter");
+
+    int ii, jj;
+    for (ii = 0; ii < m; ii++)
+    {
+        int colI;
+        string nameI;
+        _fet_batch_param_col_name(selected[ii], colI, nameI);
+        outWks.Columns(ii + 1).SetLongName(nameI);
+        outWks.SetCell(ii, 0, nameI);
+    }
+
+    for (ii = 0; ii < m; ii++)
+    {
+        int colI;
+        string nameI;
+        _fet_batch_param_col_name(selected[ii], colI, nameI);
+        for (jj = 0; jj < m; jj++)
+        {
+            if (ii == jj)
+            {
+                outWks.SetCell(ii, jj + 1, 1.0);
+                continue;
+            }
+            int colJ;
+            string nameJ;
+            _fet_batch_param_col_name(selected[jj], colJ, nameJ);
+            vector pairX, pairY;
+            _fet_read_batch_param_pair(paramsWks, colI, colJ, pairX, pairY);
+            outWks.SetCell(ii, jj + 1, _fet_pearson_correlation(pairX, pairY));
+        }
+    }
+    outWks.AutoSize();
+
+    string sheetPage = outWks.GetPage().GetName();
+    summaryText.Format("Correlation matrix (coefficient table -- Origin's "
+                       "native Scatter Matrix graph was unavailable) "
+                       "written to [%s]Correlation (%d parameters).",
+                       sheetPage, m);
+    return 0;
+}
+
 // Shows/hides (never deletes) the visible forward/backward segment plots
 // for the curve currently being analyzed, so choosing "Forward" in Settings
 // actually hides the backward curve on the graph instead of just skipping
@@ -4152,54 +6014,238 @@ void fet_analyzer_analyze_active()
     _fet_message(doneMessage);
 }
 
-static void _fet_analyzer_import_csv(bool makeGraph)
+static bool _fet_prompt_transfer_csv_files(string& fileList)
 {
     StringArray files;
     int nFiles = GetMultiOpenBox(files, "[CSV Files (*.csv)] *.csv", NULL, NULL,
                                  "Select FET Transfer CSV File(s)", true);
     if (nFiles <= 0 || files.GetSize() <= 0)
-        return;
+        return false;
 
-    string fileList;
+    fileList = "";
     for (int ii = 0; ii < files.GetSize(); ii++)
     {
         if (ii > 0)
             fileList += "|";
         fileList += files[ii];
     }
+    return true;
+}
+
+static void _fet_show_import_failure(TreeNode& result)
+{
+    string error;
+    error.Format("CSV import failed. Imported curves: %d; failed files: %d.\n\n"
+                 "Expected instrument format:\n"
+                 "DataName, Vg, Vd, Ig, Id, absId\n"
+                 "DataValue, ...\n\n"
+                 "Also supported: ordinary tables with Vg/Id columns.\n\n"
+                 "%s",
+                 result.Curves.nVal, result.FailedFiles.nVal,
+                 result.FailedDetails.strVal);
+    _fet_message(error, MB_OK | MB_ICONSTOP);
+}
+
+// Entry: import CSV file(s) into a worksheet. Selecting more than one file
+// switches to the compact Vg/Id-only, multi-curve layout (no graph -- run
+// multi-curve analysis on the resulting worksheet next); a single file keeps
+// the full 6-column layout and also builds the usual single-curve graph.
+void fet_analyzer_import_csv()
+{
+    string fileList;
+    if (!_fet_prompt_transfer_csv_files(fileList))
+        return;
+
+    vector<string> paths;
+    fileList.GetTokens(paths, '|');
+    bool multi = paths.GetSize() > 1;
 
     Tree result;
-    int nErr = fet_import_transfer_csv_files(fileList, result, makeGraph);
+    int nErr = fet_import_transfer_csv_files_ex(fileList, result, !multi, multi);
     if (nErr != 0)
     {
-        string error;
-        error.Format("CSV import failed. Imported curves: %d; failed files: %d.\n\n"
-                     "Expected instrument format:\n"
-                     "DataName, Vg, Vd, Ig, Id, absId\n"
-                     "DataValue, ...\n\n"
-                     "Also supported: ordinary tables with Vg/Id columns.\n\n"
-                     "%s",
-                     result.Curves.nVal, result.FailedFiles.nVal,
-                     result.FailedDetails.strVal);
-        _fet_message(error, MB_OK | MB_ICONSTOP);
+        _fet_show_import_failure(result);
         return;
     }
 
     string done;
-    if (makeGraph)
-        done.Format("Imported %d FET curve(s).\n\n"
-                    "A workbook and double-Y Id-Vg graph were created.",
-                    result.Curves.nVal);
+    if (multi)
+        done.Format("Imported %d FET curve(s) into a compact Vg/Id workbook "
+                    "(\"%s\").\n\nRun Multi-curve analysis next -- it reads "
+                    "this active worksheet directly.",
+                    result.Curves.nVal, result.Workbook.strVal);
     else
         done.Format("Imported %d FET curve(s).\n\n"
-                    "A workbook was created. No graph or analysis was generated.",
+                    "A workbook and double-Y Id-Vg graph were created.",
                     result.Curves.nVal);
     _fet_message(done);
 }
 
-void fet_analyzer_import_csv()
+// Entry: unified multi-curve analysis. Reads whichever worksheet or graph is
+// currently active (never prompts for files), batch-extracts parameters from
+// every curve, and builds the overlay graph and the histogram/statistics
+// graph together in one pass.
+void fet_analyzer_multi_analyze()
 {
-    _fet_analyzer_import_csv(false);
+    WorksheetPage book = _fet_find_multi_source_book();
+    if (!book)
+    {
+        _fet_message("Activate the imported multi-curve worksheet (or its "
+                     "overlay/statistics graph) before running multi-curve "
+                     "analysis.", MB_OK | MB_ICONEXCLAMATION);
+        return;
+    }
+    if (!_fet_get_multi_options())
+        return;
+
+    string summary;
+    int nErr = _fet_multi_analyze_core(book, summary);
+    if (nErr != 0 && nErr != 5)
+    {
+        if (nErr == 3)
+            _fet_message(summary, MB_OK | MB_ICONEXCLAMATION);
+        else
+        {
+            string error;
+            error.Format("Multi-curve analysis failed (code %d).", nErr);
+            _fet_message(error, MB_OK | MB_ICONSTOP);
+        }
+        return;
+    }
+    _fet_message(summary);
+}
+
+int fet_analyzer_multi_analyze_for_test(LPCSTR lpcszBook)
+{
+    WorksheetPage book(lpcszBook);
+    string summary;
+    return _fet_multi_analyze_core(book, summary);
+}
+
+// Exercises _fet_find_multi_source_book() against whatever graph layer is
+// currently active, the same call path the [FET Multi] button uses -- this
+// is what proves the hidden source-book tag (not dataset-name matching)
+// resolves the original import workbook from a graph that plots derived
+// data. Returns the resolved workbook's curve count, or -1 if none found.
+int fet_analyzer_find_multi_source_book_curve_count_for_test()
+{
+    WorksheetPage book = _fet_find_multi_source_book();
+    if (!book)
+        return -1;
+    Worksheet curves = book.Layers("Curves");
+    if (!curves)
+        return -1;
+    int colsPerCurve = _fet_detect_curve_layout(curves);
+    return curves.GetNumCols() / colsPerCurve;
+}
+
+// Test hooks for the scatter+histograms and correlation-matrix builders,
+// bypassing their settings dialogs (GetNBox blocks for interactive input,
+// which a headless smoke test can't drive).
+int fet_analyzer_scatter_hist_for_test(int xParamIdx, int yParamIdx)
+{
+    string summary;
+    return _fet_build_scatter_hist_graph(xParamIdx, yParamIdx, summary) ? 0 : 1;
+}
+
+int fet_analyzer_correlation_matrix_for_test()
+{
+    vector<int> selected = { 0, 1, 3 };
+    string summary;
+    return _fet_build_correlation_matrix(selected, summary);
+}
+
+// [Prev]/[Next] button handlers on the statistics graph: only re-render from
+// the already-computed [FETStatsData]Statistics/Histogram sheets, never
+// re-run curve fitting.
+void fet_analyzer_stats_prev_param()
+{
+    GraphLayer gl;
+    gl = Project.ActiveLayer();
+    if (!gl)
+        return;
+    g_fet_stats_current_param = (g_fet_stats_current_param + FET_STATS_PARAM_COUNT - 1)
+                               % FET_STATS_PARAM_COUNT;
+    _fet_render_stats_param(gl, g_fet_stats_current_param);
+    gl.GetPage().Refresh();
+}
+
+void fet_analyzer_stats_next_param()
+{
+    GraphLayer gl;
+    gl = Project.ActiveLayer();
+    if (!gl)
+        return;
+    g_fet_stats_current_param = (g_fet_stats_current_param + 1) % FET_STATS_PARAM_COUNT;
+    _fet_render_stats_param(gl, g_fet_stats_current_param);
+    gl.GetPage().Refresh();
+}
+
+// Entry: scatter plot of two batch-result parameters with marginal
+// histograms on each axis. Reads [FETStatsData]Parameters -- run Multi-Curve
+// Analysis at least once first.
+void fet_analyzer_scatter_hist()
+{
+    WorksheetPage statsBook(FET_STATS_DATA_PAGE);
+    Worksheet paramsWks;
+    if (statsBook)
+        paramsWks = statsBook.Layers("Parameters");
+    if (!paramsWks || paramsWks.GetNumRows() < 1)
+    {
+        _fet_message("Run Multi-Curve Analysis first -- this reads its "
+                     "[FETStatsData]Parameters table.",
+                     MB_OK | MB_ICONEXCLAMATION);
+        return;
+    }
+    if (!_fet_get_scatter_options())
+        return;
+
+    string summary;
+    if (!_fet_build_scatter_hist_graph(g_fet_scatter_x_param, g_fet_scatter_y_param,
+                                       summary))
+    {
+        _fet_message("Not enough curves with both parameters present to plot "
+                     "(need at least 2).", MB_OK | MB_ICONEXCLAMATION);
+        return;
+    }
+    _fet_message(summary);
+}
+
+// Entry: pairwise Pearson correlation table over selected batch-result
+// parameters. Also reads [FETStatsData]Parameters.
+void fet_analyzer_correlation_matrix()
+{
+    WorksheetPage statsBook(FET_STATS_DATA_PAGE);
+    Worksheet paramsWks;
+    if (statsBook)
+        paramsWks = statsBook.Layers("Parameters");
+    if (!paramsWks || paramsWks.GetNumRows() < 1)
+    {
+        _fet_message("Run Multi-Curve Analysis first -- this reads its "
+                     "[FETStatsData]Parameters table.",
+                     MB_OK | MB_ICONEXCLAMATION);
+        return;
+    }
+
+    vector<int> selected;
+    if (!_fet_get_correlation_options(selected))
+        return;
+    if (selected.GetSize() < 2)
+    {
+        _fet_message("Select at least two parameters.", MB_OK | MB_ICONEXCLAMATION);
+        return;
+    }
+
+    string summary;
+    int nErr = _fet_build_correlation_matrix(selected, summary);
+    if (nErr != 0)
+    {
+        string error;
+        error.Format("Correlation matrix failed (code %d).", nErr);
+        _fet_message(error, MB_OK | MB_ICONSTOP);
+        return;
+    }
+    _fet_message(summary);
 }
 
 int fet_analyzer_get_launch_mode()
@@ -4217,7 +6263,43 @@ int fet_analyzer_get_launch_mode()
     return FET_LAUNCH_IMPORT_CSV;
 }
 
+// Real GetNBox dialogs (ordinary Windows dialog windows, not a graph page --
+// an earlier version drew the menu as buttons on a hidden-axes graph, which
+// read as "the App just opened a plot" rather than a menu and was reverted;
+// a later version used a GETN_LIST dropdown instead of buttons, which wasn't
+// what was wanted either). GetNBox's custom-button mechanism tops out at 4
+// extra buttons beyond OK/Cancel (GETNE_ON_CUSTOM_BUTTON5 does not exist,
+// confirmed by probe) -- one short of this App's 5 operations -- so the 2
+// newer, less-common operations sit behind a "More..." button that opens a
+// second small button dialog, keeping every level real buttons.
 static int s_fet_start_action = 0;
+
+static int _fet_more_dialog_event(TreeNode& tr, int nRow, int nEvent,
+                                  DWORD& dwEnables, LPCSTR lpcszNodeName,
+                                  WndContainer& getNContainer,
+                                  string& strAux, string& strErrMsg)
+{
+    if (nEvent == GETNE_ON_CUSTOM_BUTTON1)
+    {
+        s_fet_start_action = FET_LAUNCH_SCATTER_HIST;
+        return PEVENT_GETN_RET_TO_CLOSE;
+    }
+    if (nEvent == GETNE_ON_CUSTOM_BUTTON2)
+    {
+        s_fet_start_action = FET_LAUNCH_CORRELATION_MATRIX;
+        return PEVENT_GETN_RET_TO_CLOSE;
+    }
+    return 0;
+}
+
+static int _fet_show_more_dialog()
+{
+    GETN_BOX(menu)
+    GETN_STR(Hint, "Choose an operation:", "") GETN_HINT
+    GETN_CUSTOM_BUTTON("OK=|Cancel=Back|Scatter + Histograms|Correlation Matrix")
+    GetNBox(menu, _fet_more_dialog_event, FET_APP_TITLE, "");
+    return s_fet_start_action;
+}
 
 static int _fet_start_dialog_event(TreeNode& tr, int nRow, int nEvent,
                                    DWORD& dwEnables, LPCSTR lpcszNodeName,
@@ -4234,6 +6316,16 @@ static int _fet_start_dialog_event(TreeNode& tr, int nRow, int nEvent,
         s_fet_start_action = FET_LAUNCH_GRAPH_ANALYSIS;
         return PEVENT_GETN_RET_TO_CLOSE;
     }
+    if (nEvent == GETNE_ON_CUSTOM_BUTTON3)
+    {
+        s_fet_start_action = FET_LAUNCH_MULTI_ANALYZE;
+        return PEVENT_GETN_RET_TO_CLOSE;
+    }
+    if (nEvent == GETNE_ON_CUSTOM_BUTTON4)
+    {
+        s_fet_start_action = -1;  // "More..." -- open the sub-dialog
+        return PEVENT_GETN_RET_TO_CLOSE;
+    }
     return 0;
 }
 
@@ -4241,18 +6333,25 @@ static int _fet_show_start_dialog()
 {
     s_fet_start_action = 0;
     GETN_BOX(menu)
-    GETN_STR(ChooseAction, "Choose one operation.", "") GETN_HINT
-    GETN_CUSTOM_BUTTON("OK=|Cancel=Close|Import Data|Analyze Graph")
-    GetNBox(menu, _fet_start_dialog_event, FET_APP_TITLE,
-            "Import Data creates worksheets only. Analyze Graph requires an active graph.");
+    GETN_STR(Hint, "Choose an operation:", "") GETN_HINT
+    GETN_CUSTOM_BUTTON("OK=|Cancel=Close|Import|Single-Curve Analysis|Multi-Curve Analysis|More...")
+    GetNBox(menu, _fet_start_dialog_event, FET_APP_TITLE, "");
+    if (s_fet_start_action == -1)
+        return _fet_show_more_dialog();
     return s_fet_start_action;
 }
 
 void fet_analyzer_start()
 {
     int mode = _fet_show_start_dialog();
-    if (mode == FET_LAUNCH_GRAPH_ANALYSIS)
-        fet_analyzer_analyze_active();
-    else if (mode == FET_LAUNCH_IMPORT_CSV)
+    if (mode == FET_LAUNCH_IMPORT_CSV)
         fet_analyzer_import_csv();
+    else if (mode == FET_LAUNCH_GRAPH_ANALYSIS)
+        fet_analyzer_analyze_active();
+    else if (mode == FET_LAUNCH_MULTI_ANALYZE)
+        fet_analyzer_multi_analyze();
+    else if (mode == FET_LAUNCH_SCATTER_HIST)
+        fet_analyzer_scatter_hist();
+    else if (mode == FET_LAUNCH_CORRELATION_MATRIX)
+        fet_analyzer_correlation_matrix();
 }

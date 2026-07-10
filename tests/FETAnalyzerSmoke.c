@@ -6,6 +6,14 @@ int fet_analyze_xf_core(const XYRange& input, const XYRange& ssRange,
                         TreeNode& resultTree);
 int fet_import_transfer_csv_files(LPCSTR lpcszFiles, TreeNode& resultTree,
                                   bool makeGraph = true);
+int fet_import_transfer_csv_files_ex(LPCSTR lpcszFiles, TreeNode& resultTree,
+                                     bool makeGraph, bool multiStyle);
+int fet_analyzer_multi_analyze_for_test(LPCSTR lpcszBook);
+int fet_analyzer_find_multi_source_book_curve_count_for_test();
+void fet_analyzer_stats_prev_param();
+void fet_analyzer_stats_next_param();
+int fet_analyzer_scatter_hist_for_test(int xParamIdx, int yParamIdx);
+int fet_analyzer_correlation_matrix_for_test();
 int fet_analyzer_get_launch_mode();
 int fet_analyzer_auto_ranges_for_plot(DataPlot& plot, XYRange& ssRange,
                                       XYRange& vthRange);
@@ -392,6 +400,213 @@ int fet_analyzer_runtime_smoke()
         int tableLogErr = _fet_smoke_check_log_curve(tableImportedLayer, tableImportedRightLayer, 0, 0);
         if (tableLogErr != 0)
             return 440 + tableLogErr;
+    }
+    if (!g_fet_smoke_csv_path.IsEmpty() && !g_fet_smoke_table_csv_path.IsEmpty())
+    {
+        // Multi-curve import: compact Vg/Id-only layout (2 columns per
+        // curve), no graph built at import time -- multi-curve analysis
+        // reads this workbook directly afterward.
+        string multiPaths = g_fet_smoke_csv_path + "|"
+                          + g_fet_smoke_table_csv_path;
+        Tree multiImportResult;
+        int multiImportErr = fet_import_transfer_csv_files_ex(
+            multiPaths, multiImportResult, false, true);
+        if (multiImportErr != 0)
+            return 760 + multiImportErr;
+        if (multiImportResult.Curves.nVal != 3)
+            return 766;
+        if (!multiImportResult.Graph.strVal.IsEmpty())
+            return 767;
+
+        WorksheetPage multiBook(multiImportResult.Workbook.strVal);
+        if (!multiBook)
+            return 768;
+        Worksheet multiCurves = multiBook.Layers("Curves");
+        if (!multiCurves || multiCurves.GetNumCols() != 6)
+            return 769;
+        if (multiCurves.Columns(0).GetLongName().CompareNoCase("Vg") != 0
+            || multiCurves.Columns(1).GetLongName().CompareNoCase("Id") != 0
+            || multiCurves.Columns(2).GetLongName().CompareNoCase("Vg") != 0
+            || multiCurves.Columns(4).GetLongName().CompareNoCase("Vg") != 0)
+            return 781;
+
+        // Multi-curve analysis: the 25-point table curve (curve index 2,
+        // imported last) is analyzable; the two 5-point instrument curves
+        // are too short for auto range picking and must be skipped, not
+        // fail the whole run. Both the overlay graph and the statistics
+        // graph must come out of one call.
+        int multiAnalyzeErr = fet_analyzer_multi_analyze_for_test(
+            multiImportResult.Workbook.strVal);
+        if (multiAnalyzeErr != 0)
+            return 770 + multiAnalyzeErr;
+
+        WorksheetPage statsBook("FETStatsData");
+        if (!statsBook)
+            return 775;
+        Worksheet statsParams = statsBook.Layers("Parameters");
+        Worksheet statsSummary = statsBook.Layers("Statistics");
+        Worksheet statsHist = statsBook.Layers("Histogram");
+        Worksheet overlayCurves = statsBook.Layers("OverlayCurves");
+        if (!statsParams || !statsSummary || !statsHist || !overlayCurves)
+            return 776;
+        if (overlayCurves.GetNumCols() != 12)
+            return 784;
+        StringArray statsCurveNames;
+        statsParams.Columns(0).GetStringArray(statsCurveNames);
+        int statsRows = 0;
+        for (int sr = 0; sr < statsCurveNames.GetSize(); sr++)
+        {
+            if (!statsCurveNames[sr].IsEmpty())
+                statsRows++;
+        }
+        if (statsRows != 1)
+            return 777;
+        if (is_missing_value(statsParams.Cell(0, 2))
+            || is_missing_value(statsParams.Cell(0, 4)))
+            return 782;
+        if (fabs(statsSummary.Cell(0, 2) - 1) > 1e-9)
+            return 783;
+
+        // Statistics graph: a single layer showing one parameter at a time
+        // (no more six-layer grid), starting on parameter 1 (SS), with
+        // [Prev]/[Next] buttons that switch which parameter is drawn without
+        // re-running curve fitting or accumulating extra plots.
+        GraphPage statsGraph("FETStatsGraph");
+        if (!statsGraph)
+            return 778;
+        if (statsGraph.Layers.Count() != 1)
+            return 779;
+        GraphLayer statsLayer = statsGraph.Layers(0);
+        if (!statsLayer || statsLayer.DataPlots.Count() != 2)
+            return 780;
+        if (!statsLayer.GraphObjects("FET_STATS_PREV")
+            || !statsLayer.GraphObjects("FET_STATS_NEXT")
+            || !statsLayer.GraphObjects("FET_STATS_TITLE"))
+            return 790;
+        GraphObject statsTitle = statsLayer.GraphObjects("FET_STATS_TITLE");
+        string statsTitleText = statsTitle.Text;
+        if (statsTitleText.Find("1 / 6") < 0 || statsTitleText.Find("SS") < 0)
+            return 791;
+
+        statsGraph.SetShow(PAGE_ACTIVATE);
+        set_active_layer(statsLayer);
+        fet_analyzer_stats_next_param();
+        if (statsLayer.DataPlots.Count() != 2)
+            return 792;
+        GraphObject statsTitleAfterNext = statsLayer.GraphObjects("FET_STATS_TITLE");
+        string statsTitleAfterNextText = statsTitleAfterNext.Text;
+        if (statsTitleAfterNextText.Find("2 / 6") < 0
+            || statsTitleAfterNextText.Find("Vth") < 0)
+            return 793;
+        fet_analyzer_stats_prev_param();
+        GraphObject statsTitleAfterPrev = statsLayer.GraphObjects("FET_STATS_TITLE");
+        string statsTitleAfterPrevText = statsTitleAfterPrev.Text;
+        if (statsTitleAfterPrevText.Find("1 / 6") < 0
+            || statsTitleAfterPrevText.Find("SS") < 0)
+            return 794;
+
+        // Regression guard: clicking [FET Multi] from either graph must
+        // resolve back to the 3-curve source workbook -- both graphs plot
+        // derived data, not the original import table, so this exercises the
+        // hidden source-book tag rather than dataset-name matching.
+        if (fet_analyzer_find_multi_source_book_curve_count_for_test() != 3)
+            return 795;
+
+        // Overlay graph: no legend, no single-curve config button, has the
+        // [FET Multi] re-run button, one plot per curve per layer (none of
+        // the three curves have a backward segment), and the curve with the
+        // lowest SS (the only one successfully analyzed) must stand out with
+        // a visibly bolder line than the others.
+        GraphPage multiGraph("FETMultiOverlayGraph");
+        if (!multiGraph)
+            return 785;
+        GraphLayer multiLeft = multiGraph.Layers(0);
+        GraphLayer multiRight = multiGraph.Layers(1);
+        if (!multiLeft || !multiRight)
+            return 786;
+        if (!multiLeft.GraphObjects("FET_MULTI")
+            || multiLeft.GraphObjects("FET_LEGEND")
+            || multiLeft.GraphObjects("FET_CONFIG"))
+            return 787;
+        if (multiLeft.DataPlots.Count() != 3
+            || multiRight.DataPlots.Count() != 3)
+            return 788;
+
+        int boldPlots = 0;
+        for (int mp = 0; mp < multiLeft.DataPlots.Count(); mp++)
+        {
+            DataPlot candidate = multiLeft.DataPlots(mp);
+            if (!candidate)
+                continue;
+            Tree plotFormat;
+            plotFormat = candidate.GetFormat(FPB_ALL, FOB_ALL, true, true);
+            if (plotFormat.Root.Line.Width.dVal > 2.0)
+                boldPlots++;
+        }
+        if (boldPlots != 1)
+            return 789;
+
+        multiGraph.SetShow(PAGE_ACTIVATE);
+        set_active_layer(multiLeft);
+        if (fet_analyzer_find_multi_source_book_curve_count_for_test() != 3)
+            return 796;
+
+        // Scatter + marginal histograms and the correlation matrix both read
+        // [FETStatsData]Parameters directly rather than re-fitting curves.
+        // The real multi-curve fixture above only ever produces one
+        // successfully-analyzed row (the two instrument curves are too
+        // short), which isn't enough to scatter/correlate against itself --
+        // so exercise the success path with a small synthetic 4-row batch
+        // written directly into that same table.
+        WorksheetPage syntheticStatsBook("FETStatsData");
+        Worksheet syntheticParams;
+        if (syntheticStatsBook)
+            syntheticParams = syntheticStatsBook.Layers("Parameters");
+        if (!syntheticParams)
+            return 797;
+        syntheticParams.SetSize(4, 12);
+        for (int synRow = 0; synRow < 4; synRow++)
+        {
+            syntheticParams.SetCell(synRow, 0, "SynthCurve");
+            syntheticParams.SetCell(synRow, 1, "+");
+            syntheticParams.SetCell(synRow, 2, 80.0 + synRow * 5);
+            syntheticParams.SetCell(synRow, 4, 0.2 + synRow * 0.05);
+            syntheticParams.SetCell(synRow, 6, 10.0 + synRow);
+            syntheticParams.SetCell(synRow, 7, 30.0 + synRow * 2);
+            syntheticParams.SetCell(synRow, 8, 5.0 + synRow);
+            syntheticParams.SetCell(synRow, 9, 0.001);
+            syntheticParams.SetCell(synRow, 10, 5000.0);
+            syntheticParams.SetCell(synRow, 11, 3.7);
+        }
+
+        if (fet_analyzer_scatter_hist_for_test(4, 0) != 0)
+            return 798;
+        GraphPage scatterGraph("FETScatterGraph");
+        if (!scatterGraph || scatterGraph.Layers.Count() != 3)
+            return 799;
+        GraphLayer scatterMain = scatterGraph.Layers(0);
+        if (!scatterMain || scatterMain.DataPlots.Count() != 1)
+            return 800;
+        GraphLayer scatterTop = scatterGraph.Layers(1);
+        GraphLayer scatterRight = scatterGraph.Layers(2);
+        if (!scatterTop || scatterTop.DataPlots.Count() != 1
+            || !scatterRight || scatterRight.DataPlots.Count() != 1)
+            return 801;
+
+        if (fet_analyzer_correlation_matrix_for_test() != 0)
+            return 802;
+        WorksheetPage corrBook("FETStatsData");
+        Worksheet corrWks;
+        if (corrBook)
+            corrWks = corrBook.Layers("Correlation");
+        // GetNumRows() may exceed 3: Origin worksheets have a built-in
+        // minimum row count that SetSize() cannot shrink a fresh sheet
+        // below, so only the first 3 rows (what _fet_build_correlation_matrix
+        // actually wrote) are checked.
+        if (!corrWks || corrWks.GetNumRows() < 3 || corrWks.GetNumCols() != 4)
+            return 803;
+        if (fabs(corrWks.Cell(0, 1) - 1.0) > 1e-9)
+            return 804;
     }
     if (!g_fet_smoke_output_csv_path.IsEmpty())
     {
