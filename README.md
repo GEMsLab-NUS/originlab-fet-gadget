@@ -109,99 +109,64 @@ to your workspace in Origin's Code Builder to edit and debug in place. See
 
 ## Usage
 
-Launching **FET Gadget** (App Gallery icon or toolbar button) opens a small dialog with direct
-buttons for **Import**, **Single-Curve Analysis**, and **Multi-Curve Analysis**, plus a
-**More...** button that opens a second dialog with **Scatter + Histograms** and
+Launching **FET Gadget** opens a dialog with buttons for **Import**, **Single-Curve Analysis**,
+and **Multi-Curve Analysis**, plus a **More...** button for **Scatter + Histograms** and
 **Correlation Matrix**.
 
-**Demo videos:** 🎬 [Import & single-curve analysis](asset/import-and-single-curve-analyze.mp4) ·
-🎬 [Multi-curve analysis](asset/multicurve-analyze.mp4)
+### Demo videos
+
+**Import & single-curve analysis**
+
+https://github.com/user-attachments/assets/25d83a72-da7c-4a33-8b2c-386c827eeda9
+
+**Multi-curve analysis**
+
+https://github.com/user-attachments/assets/73d247df-0e6e-4a9b-8612-da2a005568a7
 
 ### Import
 
 Pick one or more CSV files.
 
-- **One file** — imports in full (`Vg/Id/Ig/absId/Vd/logAbsId`, one curve per file or per
-  `DataName` block) and also builds the usual dual-axis Id-Vg graph, ready for single-curve
-  analysis.
-- **More than one file** — builds a single, compact workbook instead: `Vg`/`Id` only, laid out as
-  repeating XYXY column pairs (one pair per curve), no graph. This is the lightweight entry point
-  for multi-curve analysis below — run it next with the imported workbook active.
+- **One file** — full import (`Vg/Id/Ig/absId/Vd/logAbsId`) plus the dual-axis Id-Vg graph, ready
+  for single-curve analysis.
+- **Multiple files** — a compact `Vg`/`Id`-only workbook (XYXY column pairs, no graph) — the entry
+  point for multi-curve analysis.
 
 ### Single-curve analysis
 
-1. **Select a curve** — on the graph an import created, click the right-axis `Id` curve you want
-   to analyze to make it the active plot (a graph can hold several curves; you must select one).
-   Launch **FET Gadget** → **Single-curve analysis**: if there are no range cursors yet, the App
-   places one set automatically (two sets if it detects a forward+backward double sweep).
-2. **Adjust the fit windows** — drag the vertical cursors: the solid pair covers the forward SS
-   subthreshold region / Vth linear turn-on segment, the dash-dot pair (if present) covers the
-   backward equivalent. Drag the orange/red Ioff reference line to set the off-state level
-   manually — it recomputes Ioff and Ion/Ioff on release. The Ion reference line is fixed.
-3. **Read the results** — run **Single-curve analysis** once more to compute. The graph shows the
-   SS/Vth fit lines and a summary box (`[+]` forward, `[-]` backward). Full results are written to
-   the hidden `FETGraphData` workbook's `Extracted Parameters` sheet (one row per curve per
-   direction, accumulated across every curve you've analyzed).
-4. **Settings** — click the `FET Gadget` button on the graph to open Device / Extraction / Cursors
-   / Graph / Output settings: channel `L`/`W`, `Cox` (direct entry or by material/thickness), `Vd`,
-   smoothing window, auto fit-window sizes, minimum R², scan mode, colors, and what gets drawn.
-   Switching scan mode only changes what this pass draws/analyzes — it never deletes the other
-   direction's cursors, so switching back reuses them instantly.
+1. Click the `Id` curve on the graph to select it, then run **Single-curve analysis** — it
+   auto-places range cursors (two pairs if it detects a forward+backward sweep).
+2. Drag the cursors to set the SS/Vth fit windows (solid = forward, dash-dot = backward) and drag
+   the Ioff reference line to set the off-state level.
+3. Run **Single-curve analysis** again to compute. Fit lines and a summary box (`[+]`/`[-]`) are
+   drawn on the graph; results are appended to `FETGraphData → Extracted Parameters`.
+4. Click the `FET Gadget` button on the graph for Device/Extraction/Cursors/Graph/Output settings
+   (`L`/`W`/`Cox`/`Vd`, smoothing, fit-window sizes, min R², scan mode, colors). Switching scan
+   mode never discards the other direction's cursors.
 
 ### Multi-curve analysis
 
-Unlike the other two operations, this one never prompts for files — it reads whichever worksheet
-or graph is **already active**: the compact workbook a multi-file import just created, or a
-previous multi-curve run's overlay/statistics graph.
+Reads whichever worksheet or graph is **already active** — no file prompt.
 
-1. **Run it** — with the multi-curve workbook (or one of its graphs) active, launch **FET Gadget**
-   → **Multi-Curve Analysis** (or click the `[FET Multi]` button on either resulting graph). A
-   settings dialog collects the device parameters (`L`/`W`/`Cox`/`Vd`), the analyzed sweep segment
-   (forward/backward), smoothing/fit-window/R² settings, the histogram bin count (0 = automatic),
-   and which parameter the statistics graph should open on.
-2. **Watch it work** — CSV import and the per-curve fitting loop both show progress: a native
-   progress bar (Cancel keeps whatever finished so far instead of discarding it), a status-bar
-   text readout, plus a live readout drawn directly on the statistics graph while fitting runs.
-3. **Read the results** — every curve is auto-analyzed with the same SS/Vth window picking as
-   single-curve mode, in one pass that builds both graphs together:
-   - **Overlay graph** (`FETMultiOverlayGraph`) — log `|Id|` on the left axis, linear `Id` on the
-     right, using the same fixed indigo/amber palette as a single-curve import (colored axes
-     included), not a rainbow of per-curve colors. No legend. Every curve is genuinely translucent
-     except the one with the best (lowest) SS, which is fully opaque and bold — the standout curve
-     is the point, not a color key.
-   - **Statistics graph** (`FETStatsGraph`) — one distribution histogram at a time (SS, Vth, gm,
-     µFE, Ion, or log₁₀(Ion/Ioff)), with a scaled normal-distribution overlay and an N/µ/σ label,
-     on a 5-inch square page sized to match. `[Prev]`/`[Next]` buttons in the bottom corners cycle
-     through all six, wrapping around in both directions, without re-running curve fitting.
-   - **Data** (`FETStatsData` workbook) — `Parameters` (one row per curve: SS, Vth, gm, mobility,
-     Ion/Ioff, …), `Statistics` (N, mean, SD, median, min, max, CV per parameter), `Histogram`
-     (the binned data), and `OverlayCurves` (the derived Vg/Id/absId/logAbsId data the overlay
-     graph plots from). Curves too short or too noisy to fit are skipped and listed, never fatal.
+1. Run **Multi-Curve Analysis** (or click `[FET Multi]` on a result graph) and set device/fit
+   parameters, histogram bin count, and which parameter to open the stats graph on.
+2. Every curve is fit automatically (progress bar + Cancel support), building:
+   - **Overlay graph** (`FETMultiOverlayGraph`) — log `|Id|`/linear `Id`, all curves translucent
+     except the lowest-SS one, which is solid and bold.
+   - **Statistics graph** (`FETStatsGraph`) — one histogram at a time (SS, Vth, gm, µFE, Ion,
+     log₁₀(Ion/Ioff)) with a normal-fit overlay; `[Prev]`/`[Next]` cycles through all six.
+   - **Data** (`FETStatsData`) — `Parameters`, `Statistics`, `Histogram`, `OverlayCurves` sheets.
 
-### Scatter + Histograms
+### Scatter + Histograms / Correlation Matrix
 
-Needs `[FETStatsData]Parameters` to already exist — run **Multi-Curve Analysis** at least once
-first. This never re-fits curves; it reads the batch results directly.
+Both need `[FETStatsData]Parameters` to exist (run Multi-Curve Analysis first) and never re-fit
+curves.
 
-1. **Pick parameters** — the settings dialog has two dropdowns, X-axis and Y-axis, each offering
-   SS, Vth, gm, Mobility, Ion, Ioff, Ion/Ioff, or log₁₀(Ion/Ioff).
-2. **Read the graph** (`FETScatterGraph`) — tries Origin's native "Marginal Histograms" gallery
-   template first; if that can't be confirmed, falls back automatically to a hand-built equivalent:
-   a main scatter plot (bottom-left) with a histogram along the top (X distribution) and one along
-   the right (Y distribution), both aligned to the scatter's own axis range. Either way the result
-   ends up under this same graph name.
-
-### Correlation Matrix
-
-Also needs `[FETStatsData]Parameters` to already exist.
-
-1. **Pick parameters** — the settings dialog has a checkbox per parameter (same 8 as above); check
-   at least two.
-2. **Read the result** (`FETCorrelationGraph`) — tries Origin's native "Scatter Matrix" gallery
-   template first (with ellipse and linear-fit overlays); if that can't be confirmed, falls back
-   automatically to a coefficient table at `[FETStatsData]Correlation` (see
-   [Roadmap](#roadmap)), one row/column per selected parameter, Pearson correlation in each cell,
-   `1.0` on the diagonal.
+- **Scatter + Histograms** — pick X/Y parameters (SS, Vth, gm, Mobility, Ion, Ioff, Ion/Ioff, or
+  log₁₀ ratio); builds `FETScatterGraph` (native "Marginal Histograms" template, hand-built
+  fallback).
+- **Correlation Matrix** — check 2+ parameters; builds `FETCorrelationGraph` (native "Scatter
+  Matrix" template, Pearson-coefficient-table fallback at `[FETStatsData]Correlation`).
 
 ## Supported CSV formats
 
