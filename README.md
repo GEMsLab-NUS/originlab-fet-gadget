@@ -117,11 +117,11 @@ and **Multi-Curve Analysis**, plus a **More...** button for **Scatter + Histogra
 
 **Import & single-curve analysis**
 
-https://github.com/user-attachments/assets/25d83a72-da7c-4a33-8b2c-386c827eeda9
+https://github.com/user-attachments/assets/73d247df-0e6e-4a9b-8612-da2a005568a7
 
 **Multi-curve analysis**
 
-https://github.com/user-attachments/assets/73d247df-0e6e-4a9b-8612-da2a005568a7
+https://github.com/user-attachments/assets/25d83a72-da7c-4a33-8b2c-386c827eeda9
 
 ### Import
 
