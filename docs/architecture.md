@@ -203,28 +203,34 @@ App Gallery
   auto-adds a legend for the 2-plot (bars + Gaussian) layer, immediately
   removed with `label -r legend;` in the same script -- not wanted since the
   color/axis label already identify the series. The N/mean/SD readout
-  (`FET_HIST_STAT`) is a label above the frame acting as the title. THREE
-  earlier attempts at this missed: LabTalk's `-t` switch (the special object
-  literally named `TITLE`) landed top-LEFT instead of Origin auto-centering
-  it; a manual `-p 50 96 -j 1` (hoping `-j 1` would center-justify around
-  x=50) didn't either -- `-j` governs multi-line text alignment WITHIN the
-  object's own box, not which point of the box the (x, y) coordinate anchors
-  to, and for `label -p` that anchor is always the object's own Left-Top
-  corner regardless of `-j` (confirmed via Object Properties > Position tab:
+  (`FET_HIST_STAT`) is a label above the frame acting as the title, at
+  `-p 15 97 -j 0` -- the exact same page-percent placement style (and same
+  Y) as `[FET Multi]`'s own `-p 88 97 -j 1`, which has sat reliably above
+  this frame for the app's whole history. **Getting here took four failed
+  attempts, all abandoned** rather than chasing a fifth workaround:
+  (1) LabTalk's `-t` switch (the special object literally named `TITLE`)
+  landed top-LEFT instead of Origin auto-centering it; (2) a manual
+  `-p 50 96 -j 1` (hoping `-j 1` would center-justify around x=50) didn't
+  either -- `-j` governs multi-line text alignment WITHIN the object's own
+  box, not which point of the box the (x, y) coordinate anchors to, and for
+  `label -p` that anchor is always the object's own Left-Top corner
+  regardless of `-j` (confirmed via Object Properties > Position tab:
   Horizontal came back as exactly the input 50, unshifted for the text's
-  rendered width); and even once the target position `(0, -7)` in "% of
-  layer" units (Left-Top anchor, `-j 0`; verified correct by inspecting that
-  same tab -- layer-percent coordinates run top-down from the frame's own
-  top edge, so a negative Y sits in the margin above it) was known, `label
-  -p 0 -7 -j 0 ...` in one shot silently failed to create the object at all,
-  and `label -p 0 (-7) -j 0 ...` created it but at the WRONG position (read
-  back as Y=10.5) -- both confirmed via COM probe. The only combination that
-  actually works: create at a neutral `-p 0 0`, then move it with a
-  follow-up `FET_HIST_STAT.y=-7;` property assignment, an ordinary
-  (negative-safe) numeric expression rather than a positional switch
-  argument. There's no separate "Parameter X / Y: name" header anymore,
-  since `[Prev]`/`[Next]` and the X-axis label already show the parameter
-  name. `[Prev]`/`[Next]` sit in the bottom corners (`-p 2 3` / `-p 88 3`),
+  rendered width); (3) even once a negative-Y target `(0, -7)` in "% of
+  layer" units was identified as visually correct (verified by inspecting
+  that same tab), `label -p 0 -7 -j 0 ...` in one shot silently failed to
+  create the object at all, and `label -p 0 (-7) -j 0 ...` created it but at
+  the WRONG position (read back as Y=10.5) -- both confirmed via COM probe;
+  (4) the workaround for THAT -- create at neutral `-p 0 0`, then move it
+  with a follow-up `FET_HIST_STAT.y=-7;` property assignment -- read back
+  correctly at exactly -7 across every repeatable scenario a COM probe could
+  throw at it (repeated Prev/Next, repeated full page rebuilds, a real
+  visible window, even manually resizing that window), yet still drifted to
+  `(0, 173)` in real use by an as-yet-unidentified trigger. Any negative or
+  otherwise out-of-[0,100]-range "% of layer" Y is now avoided entirely.
+  There's no separate "Parameter X / Y: name" header anymore, since
+  `[Prev]`/`[Next]` and the X-axis label already show the parameter name.
+  `[Prev]`/`[Next]` sit in the bottom corners (`-p 2 3` / `-p 88 3`),
   not the top-right, so they don't collide with the `[FET Multi]` button
   which lives at `-p 88 97`.
 - **Never delete-and-recreate a GraphObject from inside the click script it

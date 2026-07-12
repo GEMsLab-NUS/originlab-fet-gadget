@@ -9,7 +9,7 @@
 #include <xfutils.h>
 #include <sys_utils.h>
 
-#define FET_APP_TITLE "FET Gadget v0.17.0"
+#define FET_APP_TITLE "FET Gadget v0.18.0"
 #define FET_MIN_POINTS 3
 #define FET_IMPORT_COLS_PER_CURVE 6
 #define FET_IMPORT_COLS_PER_CURVE_COMPACT 2
@@ -4359,27 +4359,25 @@ static bool _fet_render_stats_param(GraphLayer& gl, int paramIndex)
                        "label -yl \"Count\";YL.fsize=12;", axisTitle);
     gl.LT_execute(titleScript);
 
-    // N/mean/SD as the title, above the plot frame. Two earlier attempts
-    // both missed: LabTalk's "-t" switch (the special object named "TITLE")
-    // landed top-LEFT instead of Origin auto-centering it, and a manual
-    // "-p 50 96 -j 1" (hoping -j 1 would center-justify around x=50) turned
-    // out not to work either -- "-j" governs multi-line text alignment
-    // WITHIN the object's own box, not which point of the box the (x, y)
-    // coordinate anchors to; for "label -p" that anchor is always the
-    // object's own Left-Top corner regardless of -j (confirmed from the
-    // Object Properties > Position tab: Horizontal came back as exactly the
-    // input 50, not shifted for the text's rendered width). Attach-to-layer
-    // percent coordinates (which "-p" gives, confirmed via Position tab
-    // showing Unit = "% of layer") run top-down from the FRAME's top edge,
-    // so a negative Y sits in the margin above the frame. (0, -7) with
-    // Left-Top anchor -- i.e. "-j 0" -- is the verified-by-inspection
-    // position that actually sits above-left of the frame. Getting there
-    // needs two steps, not one "-p 0 -7 ...": a COM probe confirmed
-    // "-p 0 -7" straight up doesn't create the object at all (the "-7"
-    // isn't parsed as -p's Y argument), and "-p 0 (-7)" DOES create it but
-    // at the wrong Y (reads back as 10.5, not -7) -- so the object is
-    // created at a neutral (0, 0) first, then moved with a plain ".y=-7;"
-    // assignment, which is an ordinary negative-safe numeric expression.
+    // N/mean/SD as the title, above the plot frame. Three earlier attempts
+    // at a negative/out-of-range "% of layer" Y all failed in different
+    // ways: LabTalk's "-t" switch (the special object named "TITLE") landed
+    // top-LEFT instead of Origin auto-centering it; "-p 50 96 -j 1" (hoping
+    // -j 1 would center-justify) didn't either, since -j only governs
+    // multi-line text alignment WITHIN the object's own box, not which point
+    // anchors to (x, y) -- for "label -p" that's always the Left-Top corner
+    // regardless of -j; and even the verified-correct target (0, -7)
+    // (Left-Top anchor, "% of layer" units per the Position tab) drifted to
+    // (0, 173) after some as-yet-unidentified trigger in real use, DESPITE
+    // reading back stable at exactly -7 across every scenario a COM probe
+    // could throw at it (repeated Prev/Next, repeated full page rebuilds,
+    // a real visible window, even manually resizing that window). Rather
+    // than chase a fourth workaround for this class of bug, this now just
+    // reuses the plain positive "-p X Y -j J" placement every OTHER label in
+    // this app already uses without any drift ever being reported --
+    // `[FET Multi]`'s own `-p 88 97 -j 1` in particular, which sits reliably
+    // above this same frame. `-p 15 97 -j 0` here matches the original
+    // "Parameter X / Y: name" header this title replaced.
     //
     // Created ONCE and only its text updated on later renders, not
     // deleted-and-recreated every time -- see the [Prev]/[Next] comment
@@ -4392,20 +4390,10 @@ static bool _fet_render_stats_param(GraphLayer& gl, int paramIndex)
     GraphObject infoLabel = gl.GraphObjects("FET_HIST_STAT");
     if (!infoLabel)
     {
-        // "label -p 0 -7 ..." silently fails to create the object at all --
-        // confirmed via COM probe that a negative number straight after
-        // "-p"'s first (X) argument isn't parsed as the Y argument. Wrapping
-        // it in parens ("-p 0 (-7)") does NOT fix this either -- also probed,
-        // and it creates the object but at the WRONG position (reads back as
-        // Y=10.5, not -7). The only combination confirmed by probe to both
-        // create the object AND land it at the intended Y: position at a
-        // neutral (0, 0) first, then assign .y as an ordinary (negative-safe)
-        // numeric expression in a separate statement.
-        gl.LT_execute("label -p 0 0 -j 0 -n FET_HIST_STAT placeholder;");
+        gl.LT_execute("label -p 15 97 -j 0 -n FET_HIST_STAT placeholder;");
         infoLabel = gl.GraphObjects("FET_HIST_STAT");
         if (infoLabel)
-            gl.LT_execute("FET_HIST_STAT.y=-7;"
-                          "FET_HIST_STAT.fsize=13;FET_HIST_STAT.background=0;"
+            gl.LT_execute("FET_HIST_STAT.fsize=13;FET_HIST_STAT.background=0;"
                           "FET_HIST_STAT.color=color(37,99,235);");
     }
     if (infoLabel && !is_missing_value(n))
@@ -6371,6 +6359,19 @@ int fet_analyzer_find_multi_source_book_curve_count_for_test()
         return -1;
     int colsPerCurve = _fet_detect_curve_layout(curves);
     return curves.GetNumCols() / colsPerCurve;
+}
+
+// Re-resolves the source book from whatever is currently active (same as
+// [FET Multi]'s click path) and re-runs full multi-curve analysis on it --
+// for diagnosing whether a FULL PAGE REBUILD (as opposed to a mere
+// Prev/Next redraw) causes on-graph object positions to drift.
+int fet_analyzer_rerun_multi_analyze_for_test()
+{
+    WorksheetPage book = _fet_find_multi_source_book();
+    if (!book)
+        return -1;
+    string summary;
+    return _fet_multi_analyze_core(book, summary);
 }
 
 // Test hooks for the scatter+histograms and correlation-matrix builders,
