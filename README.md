@@ -114,8 +114,15 @@ buttons for **Import**, **Single-Curve Analysis**, and **Multi-Curve Analysis**,
 **More...** button that opens a second dialog with **Scatter + Histograms** and
 **Correlation Matrix**.
 
-**Demo videos:** 🎬 [Import & single-curve analysis](asset/import-and-single-curve-analyze.mp4) ·
-🎬 [Multi-curve analysis](asset/multicurve-analyze.mp4)
+### Demo videos
+
+**Import & single-curve analysis**
+
+https://github.com/GEMsLab-NUS/originlab-fet-gadget/raw/main/asset/import-and-single-curve-analyze.mp4
+
+**Multi-curve analysis**
+
+https://github.com/GEMsLab-NUS/originlab-fet-gadget/raw/main/asset/multicurve-analyze.mp4
 
 ### Import
 
