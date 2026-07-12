@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="origin-app/FET%20Analyzer/AppIcon.svg" width="72" height="72" alt="FET Gadget icon">
+</p>
+
 # FET Gadget for Origin
 
 <p align="center">
@@ -8,6 +12,10 @@
 </p>
 
 <p align="center"><b>English</b> | <a href="README.zh-CN.md">简体中文</a></p>
+
+<p align="center">
+<a href="#demo-videos">Demo</a> | <a href="#requirements">Requirements</a> | <a href="#installation">Installation</a> | <a href="#usage">Usage</a> | <a href="#supported-csv-formats">CSV formats</a> | <a href="#output">Output</a> | <a href="#features">Features</a> | <a href="#project-layout">Project layout</a> | <a href="#development">Development</a> | <a href="#roadmap">Roadmap</a> | <a href="#license">License</a>
+</p>
 
 An interactive FET (field-effect transistor) transfer-curve analysis App for Origin/OriginPro.
 Import raw CSVs, drag range cursors on the graph to bracket the fit windows, and extract SS, Vth,
@@ -25,38 +33,15 @@ an earlier iteration — both names refer to the same App.
   backward (<code>[-]</code>) parameter summary drawn directly on the plot.</sub>
 </p>
 
-## Table of Contents
+## Demo videos
 
-- [Features](#features)
-- [Requirements](#requirements)
-- [Installation](#installation)
-  - [Option A — install a released OPX](#option-a--install-a-released-opx-recommended-for-users)
-  - [Option B — build from source](#option-b--build-from-source-recommended-for-developers)
-- [Usage](#usage)
-- [Supported CSV formats](#supported-csv-formats)
-- [Output](#output)
-- [Project layout](#project-layout)
-- [Development](#development)
-- [Roadmap](#roadmap)
-- [License](#license)
+**Import & single-curve analysis**
 
-## Features
+https://github.com/user-attachments/assets/73d247df-0e6e-4a9b-8612-da2a005568a7
 
-| | |
-|---|---|
-| **Flexible import** | Instrument multi-block `DataName/DataValue` CSVs, plain `Vg/Id` tables, or CSVs with explicit `Forward Vg/Forward Id/Backward Vg/Backward Id` columns. |
-| **Automatic scan detection** | Forward (rising) and backward (falling) sweeps are detected and treated as paired curves automatically. |
-| **Dual-axis graph** | Auto-generated Id-Vg graph: left axis is `\|Id\|` on a log scale, right axis is linear `Id`, both normalized to `uA/um` by channel width. |
-| **Draggable fit windows** | Two pairs of free range cursors per direction — solid for forward, dash-dot for backward — mark the SS and Vth fit windows without snapping to data points. |
-| **One-click extraction** | SS, Vth, max gm, field-effect mobility, Ion/Ioff, and hysteresis, with fit lines, reference lines, and a summary annotation drawn directly on the graph. |
-| **Live Ioff** | Drag the Ioff reference line and Ioff / Ion-Ioff recompute immediately, on the graph and in the results table. |
-| **Non-destructive scan mode** | Switching Auto/Forward/Backward/Both in Settings hides the unused direction's curve (not deletes it) and never discards the cursor positions you already tuned. |
-| **Accumulating results** | One row per curve per direction in a hidden `Extracted Parameters` table — re-analyzing a curve updates its row in place, analyzing a different curve appends a new one. |
-| **Compact multi-curve import** | Selecting more than one CSV file builds a single Vg/Id-only, multi-column (XYXY…) workbook instead of a graph — a light data table to run multi-curve analysis on next. A single file still imports in full (`Vg/Id/Ig/absId/Vd/logAbsId`) with its own graph, unchanged. |
-| **Unified multi-curve analysis** | One command reads whichever worksheet or graph is already active (no file prompt), extracts SS/Vth/gm/mobility/Ion/Ioff from every curve, and builds the overlay graph and the parameter-distribution graph together. The overlay keeps the classic single-curve palette (indigo log axis, amber linear axis, both colored on the axes too) — every curve is genuinely translucent except the one with the best (lowest) SS, which stands out solid, bold, and fully opaque. No legend needed. Fitting settings live behind a `[FET Multi]` button right on either graph, with a `[Prev]`/`[Next]` pair to step through all 6 parameters. |
-| **Scatter + marginal histograms** | Plot any two batch parameters (SS, Vth, gm, mobility, Ion, Ioff, Ion/Ioff, log₁₀ ratio) against each other with a histogram along each axis, aligned to the scatter's own range. Pick X/Y from two dropdowns. Tries Origin's native "Marginal Histograms" gallery template first, falls back to a hand-built equivalent graph automatically. |
-| **Correlation matrix** | Pick which parameters to include with checkboxes; get a correlation **plot** — Origin's native "Scatter Matrix" gallery template — with a Pearson coefficient table as an automatic fallback if that can't be built. |
-| **Progress while it runs** | Multi-file import and multi-curve batch fitting both show a native progress bar (with Cancel support) plus a status-bar text readout, instead of leaving you guessing. |
+**Multi-curve analysis**
+
+https://github.com/user-attachments/assets/25d83a72-da7c-4a33-8b2c-386c827eeda9
 
 ## Requirements
 
@@ -79,7 +64,8 @@ an earlier iteration — both names refer to the same App.
 2. Drag the `.opx` file onto a running Origin window and follow the install prompt.
 3. **FET Gadget** now appears in the App Gallery / Apps panel.
 
-### Option B — build from source (recommended for developers)
+<details>
+<summary><b>Option B — build from source</b> (recommended for developers)</summary>
 
 ```powershell
 git clone https://github.com/GEMsLab-NUS/originlab-fet-gadget.git
@@ -107,21 +93,13 @@ to your workspace in Origin's Code Builder to edit and debug in place. See
 
 </details>
 
+</details>
+
 ## Usage
 
 Launching **FET Gadget** opens a dialog with buttons for **Import**, **Single-Curve Analysis**,
 and **Multi-Curve Analysis**, plus a **More...** button for **Scatter + Histograms** and
 **Correlation Matrix**.
-
-### Demo videos
-
-**Import & single-curve analysis**
-
-https://github.com/user-attachments/assets/73d247df-0e6e-4a9b-8612-da2a005568a7
-
-**Multi-curve analysis**
-
-https://github.com/user-attachments/assets/25d83a72-da7c-4a33-8b2c-386c827eeda9
 
 ### Import
 
@@ -193,6 +171,24 @@ covering each format:
 | Workbook `FETStatsData` + graph `FETStatsGraph` | Multi-curve analysis output: `Parameters` (one row per analyzed curve), `Statistics` (N/mean/SD/median/min/max/CV per parameter), `Histogram` (bin data), `OverlayCurves` (derived data feeding the overlay graph), and a single-panel histogram graph with `[Prev]`/`[Next]` buttons to step through all six parameters. Rebuilt on every multi-curve analysis run. |
 | Graph `FETScatterGraph` | Scatter of two chosen batch parameters plus marginal histograms on each axis (native Origin template when available, hand-built fallback otherwise), all aligned to the same range. Rebuilt on every Scatter + Histograms run. |
 | Graph `FETCorrelationGraph` (or workbook `FETStatsData` → `Correlation` as a fallback) | Native Scatter Matrix plot over the parameters you checked, or — if that can't be confirmed — a Pearson correlation coefficient table. Rebuilt on every Correlation Matrix run. |
+
+## Features
+
+| | |
+|---|---|
+| **Flexible import** | Multi-block instrument CSVs, plain `Vg/Id` tables, or explicit forward/backward columns. |
+| **Auto scan detection** | Forward/backward sweeps detected and paired automatically. |
+| **Dual-axis graph** | Log `\|Id\|` + linear `Id`, normalized to `uA/um`. |
+| **Draggable fit windows** | Free range cursors per direction, no snapping to data. |
+| **One-click extraction** | SS, Vth, gm, mobility, Ion/Ioff, hysteresis — fit lines drawn on the graph. |
+| **Live Ioff** | Drag the reference line; Ioff / Ion-Ioff recompute instantly. |
+| **Non-destructive scan mode** | Switching direction hides curves and keeps cursor positions. |
+| **Accumulating results** | One row per curve/direction — updates in place or appends. |
+| **Compact multi-curve import** | Multi-file selection builds a lightweight `Vg/Id`-only workbook. |
+| **Unified multi-curve analysis** | One command builds the overlay and distribution graphs for every curve. |
+| **Scatter + marginal histograms** | Any two batch parameters, native gallery template with fallback. |
+| **Correlation matrix** | Native Scatter Matrix plot, Pearson-table fallback. |
+| **Progress while it runs** | Native progress bar + Cancel for batch operations. |
 
 ## Project layout
 
