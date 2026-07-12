@@ -116,13 +116,13 @@ buttons for **Import**, **Single-Curve Analysis**, and **Multi-Curve Analysis**,
 
 ### Demo videos
 
-**Import & single-curve analysis**
+**Import & single-curve analysis** (image-syntax test)
 
-https://github.com/GEMsLab-NUS/originlab-fet-gadget/raw/main/asset/import-and-single-curve-analyze.mp4
+![Import and single-curve analysis demo](asset/import-and-single-curve-analyze.mp4)
 
-**Multi-curve analysis**
+**Multi-curve analysis** (raw video tag test)
 
-https://github.com/GEMsLab-NUS/originlab-fet-gadget/raw/main/asset/multicurve-analyze.mp4
+<video src="https://github.com/GEMsLab-NUS/originlab-fet-gadget/raw/main/asset/multicurve-analyze.mp4" controls="controls" muted="muted"></video>
 
 ### Import
 
