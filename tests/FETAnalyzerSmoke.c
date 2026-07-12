@@ -12,6 +12,8 @@ int fet_analyzer_multi_analyze_for_test(LPCSTR lpcszBook);
 int fet_analyzer_find_multi_source_book_curve_count_for_test();
 void fet_analyzer_stats_prev_param();
 void fet_analyzer_stats_next_param();
+int fet_analyzer_stats_set_param_for_test(int paramIndex);
+int fet_analyzer_stats_current_param_for_test();
 int fet_analyzer_scatter_hist_for_test(int xParamIdx, int yParamIdx);
 int fet_analyzer_correlation_matrix_for_test();
 int fet_analyzer_get_launch_mode();
@@ -470,7 +472,9 @@ int fet_analyzer_runtime_smoke()
         // Statistics graph: a single layer showing one parameter at a time
         // (no more six-layer grid), starting on parameter 1 (SS), with
         // [Prev]/[Next] buttons that switch which parameter is drawn without
-        // re-running curve fitting or accumulating extra plots.
+        // re-running curve fitting or accumulating extra plots. The
+        // N/mean/SD readout is a centered label above the frame, not a
+        // separate "Parameter X / Y" header.
         GraphPage statsGraph("FETStatsGraph");
         if (!statsGraph)
             return 778;
@@ -481,29 +485,77 @@ int fet_analyzer_runtime_smoke()
             return 780;
         if (!statsLayer.GraphObjects("FET_STATS_PREV")
             || !statsLayer.GraphObjects("FET_STATS_NEXT")
-            || !statsLayer.GraphObjects("FET_STATS_TITLE"))
+            || !statsLayer.GraphObjects("FET_HIST_STAT"))
             return 790;
-        GraphObject statsTitle = statsLayer.GraphObjects("FET_STATS_TITLE");
+        GraphObject statsTitle = statsLayer.GraphObjects("FET_HIST_STAT");
         string statsTitleText = statsTitle.Text;
-        if (statsTitleText.Find("1 / 6") < 0 || statsTitleText.Find("SS") < 0)
+        if (statsTitleText.Find("N =") < 0 || statsTitleText.Find("\\g(m)") < 0
+            || statsTitleText.Find("\\g(s)") < 0)
             return 791;
+        // Two plots (bars + Gaussian overlay) auto-adding a legend is
+        // Origin's default; this graph explicitly deletes it.
+        if (statsLayer.GraphObjects("Legend"))
+            return 843;
 
         statsGraph.SetShow(PAGE_ACTIVATE);
         set_active_layer(statsLayer);
         fet_analyzer_stats_next_param();
         if (statsLayer.DataPlots.Count() != 2)
             return 792;
-        GraphObject statsTitleAfterNext = statsLayer.GraphObjects("FET_STATS_TITLE");
-        string statsTitleAfterNextText = statsTitleAfterNext.Text;
-        if (statsTitleAfterNextText.Find("2 / 6") < 0
-            || statsTitleAfterNextText.Find("Vth") < 0)
+        if (fet_analyzer_stats_current_param_for_test() != 1)
             return 793;
-        fet_analyzer_stats_prev_param();
-        GraphObject statsTitleAfterPrev = statsLayer.GraphObjects("FET_STATS_TITLE");
-        string statsTitleAfterPrevText = statsTitleAfterPrev.Text;
-        if (statsTitleAfterPrevText.Find("1 / 6") < 0
-            || statsTitleAfterPrevText.Find("SS") < 0)
+        if (!statsLayer.GraphObjects("FET_STATS_PREV")
+            || !statsLayer.GraphObjects("FET_STATS_NEXT"))
             return 794;
+        fet_analyzer_stats_prev_param();
+        if (fet_analyzer_stats_current_param_for_test() != 0)
+            return 825;
+
+        // fet_analyzer_stats_set_param_for_test lets other flows jump
+        // straight to an arbitrary parameter (bypassing repeated
+        // Prev/Next stepping) without going through [Prev]/[Next] at all;
+        // exercise it directly, then reset to 0 before the lap tests below.
+        if (fet_analyzer_stats_set_param_for_test(3) != 0)
+            return 840;
+        if (fet_analyzer_stats_current_param_for_test() != 3)
+            return 841;
+        if (fet_analyzer_stats_set_param_for_test(0) != 0)
+            return 842;
+
+        // Regression guard: repeated same-direction clicks must keep
+        // advancing through ALL 6 parameters (not get wedged after the first
+        // click -- an earlier version of these buttons deleted-and-recreated
+        // themselves on every render, including the render triggered by
+        // their own click, which corrupts Origin's click routing on that
+        // layer). A full lap of 6x [Prev] must visit 5,4,3,2,1,0 in that
+        // order and land back where it started, then a full lap of 6x
+        // [Next] must visit 1,2,3,4,5,0 -- the button objects must still
+        // exist after every single click, not just the first.
+        vector<int> expectedPrev = {5, 4, 3, 2, 1, 0};
+        int pn;
+        for (pn = 0; pn < 6; pn++)
+        {
+            fet_analyzer_stats_prev_param();
+            if (!statsLayer.GraphObjects("FET_STATS_PREV")
+                || !statsLayer.GraphObjects("FET_STATS_NEXT"))
+                return 826 + pn;
+            if (fet_analyzer_stats_current_param_for_test() != expectedPrev[pn])
+                return 850 + pn;
+        }
+        vector<int> expectedNext = {1, 2, 3, 4, 5, 0};
+        int nn;
+        for (nn = 0; nn < 6; nn++)
+        {
+            fet_analyzer_stats_next_param();
+            if (!statsLayer.GraphObjects("FET_STATS_PREV")
+                || !statsLayer.GraphObjects("FET_STATS_NEXT"))
+                return 833 + nn;
+            if (fet_analyzer_stats_current_param_for_test() != expectedNext[nn])
+                return 860 + nn;
+        }
+        GraphObject statsTitleFullLap = statsLayer.GraphObjects("FET_HIST_STAT");
+        if (statsTitleFullLap.Text.Find("N =") < 0)
+            return 839;
 
         // Regression guard: clicking [FET Multi] from either graph must
         // resolve back to the 3-curve source workbook -- both graphs plot

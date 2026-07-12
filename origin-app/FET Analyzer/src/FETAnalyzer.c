@@ -9,7 +9,7 @@
 #include <xfutils.h>
 #include <sys_utils.h>
 
-#define FET_APP_TITLE "FET Gadget v0.11.0"
+#define FET_APP_TITLE "FET Gadget v0.17.0"
 #define FET_MIN_POINTS 3
 #define FET_IMPORT_COLS_PER_CURVE 6
 #define FET_IMPORT_COLS_PER_CURVE_COMPACT 2
@@ -51,6 +51,7 @@
 #define FET_MULTI_BUTTON "FET_MULTI"
 #define FET_MULTI_PROGRESS_LABEL "FET_PROGRESS"
 #define FET_SOURCE_BOOK_TAG "FET_SRC_BOOK"
+#define FET_STATS_PARAM_IDX_TAG "FET_STATS_PARAM_IDX"
 #define FET_STATS_DATA_PAGE "FETStatsData"
 #define FET_STATS_GRAPH_PAGE "FETStatsGraph"
 #define FET_MULTI_OVERLAY_GRAPH_PAGE "FETMultiOverlayGraph"
@@ -2621,6 +2622,48 @@ static bool _fet_read_source_book_tag(GraphLayer& gl, string& bookName)
     return !bookName.IsEmpty();
 }
 
+// Persists which parameter the statistics graph is currently showing as a
+// hidden text tag ON THE LAYER ITSELF, the same trick as
+// _fet_tag_source_book above. [Prev]/[Next]'s own button scripts call
+// fet_analyzer_stats_prev_param()/_next_param() directly by name rather than
+// through launch.ogs -- reading the index back from the graph itself (not
+// purely from the in-memory g_fet_stats_current_param global) keeps the
+// displayed parameter correct even across separate button-click
+// invocations.
+static void _fet_write_stats_param_index_tag(GraphLayer& gl, int paramIndex)
+{
+    if (!gl)
+        return;
+    _fet_delete_graph_object(gl, FET_STATS_PARAM_IDX_TAG);
+    set_active_layer(gl);
+    string script;
+    script.Format("label -p 1 3 -n %s placeholder;", FET_STATS_PARAM_IDX_TAG);
+    gl.LT_execute(script);
+    GraphObject tag = gl.GraphObjects(FET_STATS_PARAM_IDX_TAG);
+    if (!tag)
+        return;
+    string text;
+    text.Format("%d", paramIndex);
+    tag.Text = text;
+    string hideScript;
+    hideScript.Format("%s.show=0;", FET_STATS_PARAM_IDX_TAG);
+    gl.LT_execute(hideScript);
+}
+
+static bool _fet_read_stats_param_index_tag(GraphLayer& gl, int& outIndex)
+{
+    if (!gl)
+        return false;
+    GraphObject tag = gl.GraphObjects(FET_STATS_PARAM_IDX_TAG);
+    if (!tag)
+        return false;
+    string text = tag.Text;
+    if (text.IsEmpty())
+        return false;
+    outIndex = atoi(text);
+    return true;
+}
+
 // On-graph progress readout for the batch curve-fitting loop in multi-curve
 // analysis (the slow, per-curve step). Reuses the same "label -p" text-object
 // pattern as every other on-graph annotation in this file, so it needs no
@@ -4089,6 +4132,33 @@ static bool _fet_read_batch_param_pair(Worksheet& paramsWks, int colX, int colY,
     return outX.GetSize() > 0;
 }
 
+// Reads one already-analyzed [FETStatsData]Parameters column back out (same
+// row filtering as _fet_read_batch_param_pair above). Lets the histogram bin
+// count be changed and re-binned from these stored per-curve values instead
+// of re-running curve fitting over every curve again.
+static bool _fet_read_batch_param_column(Worksheet& paramsWks, int col,
+                                         vector& outVals)
+{
+    outVals.SetSize(0);
+    if (!paramsWks)
+        return false;
+    StringArray curveNames;
+    paramsWks.Columns(0).GetStringArray(curveNames);
+    int rows = paramsWks.GetNumRows();
+    int rr;
+    for (rr = 0; rr < rows; rr++)
+    {
+        string curveName = rr < curveNames.GetSize() ? curveNames[rr] : "";
+        if (curveName.IsEmpty())
+            continue;
+        double v = paramsWks.Cell(rr, col);
+        if (is_missing_value(v))
+            continue;
+        outVals.Add(v);
+    }
+    return outVals.GetSize() > 0;
+}
+
 static double _fet_pearson_correlation(const vector& a, const vector& b)
 {
     int n = min(a.GetSize(), b.GetSize());
@@ -4260,7 +4330,7 @@ static bool _fet_render_stats_param(GraphLayer& gl, int paramIndex)
     string script;
     script  = "layer.x.type=0;layer.y.type=0;";
     script += "layer.x.grid.show=0;layer.y.grid.show=0;";
-    script += "layer -a;";
+    script += "layer -a;label -r legend;";
     script += "layer.x.label.pt=11;layer.y.label.pt=11;";
     gl.LT_execute(script);
 
@@ -4289,62 +4359,104 @@ static bool _fet_render_stats_param(GraphLayer& gl, int paramIndex)
                        "label -yl \"Count\";YL.fsize=12;", axisTitle);
     gl.LT_execute(titleScript);
 
+    // N/mean/SD as the title, above the plot frame. Two earlier attempts
+    // both missed: LabTalk's "-t" switch (the special object named "TITLE")
+    // landed top-LEFT instead of Origin auto-centering it, and a manual
+    // "-p 50 96 -j 1" (hoping -j 1 would center-justify around x=50) turned
+    // out not to work either -- "-j" governs multi-line text alignment
+    // WITHIN the object's own box, not which point of the box the (x, y)
+    // coordinate anchors to; for "label -p" that anchor is always the
+    // object's own Left-Top corner regardless of -j (confirmed from the
+    // Object Properties > Position tab: Horizontal came back as exactly the
+    // input 50, not shifted for the text's rendered width). Attach-to-layer
+    // percent coordinates (which "-p" gives, confirmed via Position tab
+    // showing Unit = "% of layer") run top-down from the FRAME's top edge,
+    // so a negative Y sits in the margin above the frame. (0, -7) with
+    // Left-Top anchor -- i.e. "-j 0" -- is the verified-by-inspection
+    // position that actually sits above-left of the frame. Getting there
+    // needs two steps, not one "-p 0 -7 ...": a COM probe confirmed
+    // "-p 0 -7" straight up doesn't create the object at all (the "-7"
+    // isn't parsed as -p's Y argument), and "-p 0 (-7)" DOES create it but
+    // at the wrong Y (reads back as 10.5, not -7) -- so the object is
+    // created at a neutral (0, 0) first, then moved with a plain ".y=-7;"
+    // assignment, which is an ordinary negative-safe numeric expression.
+    //
+    // Created ONCE and only its text updated on later renders, not
+    // deleted-and-recreated every time -- see the [Prev]/[Next] comment
+    // below for why that matters even for a non-clickable label (keeping the
+    // same pattern everywhere is simpler than special-casing "this one
+    // happens not to be clickable").
     double n = statsWks.Cell(paramIndex, 2);
     double mean = statsWks.Cell(paramIndex, 3);
     double sd = statsWks.Cell(paramIndex, 4);
-    _fet_delete_graph_object(gl, "FET_HIST_STAT");
-    gl.LT_execute("label -p 66 90 -j 0 -n FET_HIST_STAT placeholder;");
     GraphObject infoLabel = gl.GraphObjects("FET_HIST_STAT");
+    if (!infoLabel)
+    {
+        // "label -p 0 -7 ..." silently fails to create the object at all --
+        // confirmed via COM probe that a negative number straight after
+        // "-p"'s first (X) argument isn't parsed as the Y argument. Wrapping
+        // it in parens ("-p 0 (-7)") does NOT fix this either -- also probed,
+        // and it creates the object but at the WRONG position (reads back as
+        // Y=10.5, not -7). The only combination confirmed by probe to both
+        // create the object AND land it at the intended Y: position at a
+        // neutral (0, 0) first, then assign .y as an ordinary (negative-safe)
+        // numeric expression in a separate statement.
+        gl.LT_execute("label -p 0 0 -j 0 -n FET_HIST_STAT placeholder;");
+        infoLabel = gl.GraphObjects("FET_HIST_STAT");
+        if (infoLabel)
+            gl.LT_execute("FET_HIST_STAT.y=-7;"
+                          "FET_HIST_STAT.fsize=13;FET_HIST_STAT.background=0;"
+                          "FET_HIST_STAT.color=color(37,99,235);");
+    }
     if (infoLabel && !is_missing_value(n))
     {
         string info;
-        info.Format("\\i(N) = %d\n\\g(m) = %.4g\n\\g(s) = %.4g",
-                    (int)n, mean, sd);
+        info.Format("N = %d   \\g(m) = %.4g   \\g(s) = %.4g", (int)n, mean, sd);
         infoLabel.Text = info;
-        gl.LT_execute("FET_HIST_STAT.fsize=11;FET_HIST_STAT.background=0;");
-    }
-
-    string headerText;
-    headerText.Format("Parameter %d / %d: %s", paramIndex + 1,
-                      FET_STATS_PARAM_COUNT, paramName);
-    _fet_delete_graph_object(gl, "FET_STATS_TITLE");
-    gl.LT_execute("label -p 15 97 -j 0 -n FET_STATS_TITLE placeholder;");
-    GraphObject titleLabel = gl.GraphObjects("FET_STATS_TITLE");
-    if (titleLabel)
-    {
-        titleLabel.Text = headerText;
-        gl.LT_execute("FET_STATS_TITLE.fsize=12;FET_STATS_TITLE.background=0;"
-                      "FET_STATS_TITLE.color=color(37,99,235);");
     }
 
     // Bottom corners, away from FET_MULTI (top-right, -p 88 97) -- Next used
     // to sit at that exact same spot and visibly collide with it.
-    _fet_delete_graph_object(gl, "FET_STATS_PREV");
-    gl.LT_execute("label -p 2 3 -j 0 -n FET_STATS_PREV [Prev];");
+    //
+    // Created ONCE per button and only .Text/style updated on later
+    // renders -- NEVER deleted-and-recreated on every render the way an
+    // earlier version of this code (and, before that, the button-based
+    // parameter picker this reverted from) did. Deleting a GraphObject from
+    // inside the very click-script it's currently running leaves Origin's
+    // click routing on that layer wedged: the button stops responding to
+    // further clicks until some other window is activated and this one
+    // reactivated -- which is what "Prev/Next only works once" turned out to
+    // actually be. Same non-destructive create-once pattern
+    // `_fet_add_multi_button` already uses for [FET Multi], which never
+    // showed this symptom.
     GraphObject prevBtn = gl.GraphObjects("FET_STATS_PREV");
-    if (prevBtn)
+    if (!prevBtn)
     {
-        prevBtn.Text = "[Prev]";
-        string prevScript;
-        prevScript = "FET_STATS_PREV.fsize=16;FET_STATS_PREV.color=color(37,99,235);"
-                    "FET_STATS_PREV.background=0;FET_STATS_PREV.show=1;"
-                    "FET_STATS_PREV.script$=\"fet_analyzer_stats_prev_param();\";"
-                    "FET_STATS_PREV.script=1;";
-        gl.LT_execute(prevScript);
+        gl.LT_execute("label -p 2 3 -j 0 -n FET_STATS_PREV [Prev];");
+        prevBtn = gl.GraphObjects("FET_STATS_PREV");
+        if (prevBtn)
+        {
+            prevBtn.Text = "[Prev]";
+            gl.LT_execute("FET_STATS_PREV.fsize=16;FET_STATS_PREV.color=color(37,99,235);"
+                          "FET_STATS_PREV.background=0;FET_STATS_PREV.show=1;"
+                          "FET_STATS_PREV.script$=\"fet_analyzer_stats_prev_param();\";"
+                          "FET_STATS_PREV.script=1;");
+        }
     }
 
-    _fet_delete_graph_object(gl, "FET_STATS_NEXT");
-    gl.LT_execute("label -p 88 3 -j 1 -n FET_STATS_NEXT [Next];");
     GraphObject nextBtn = gl.GraphObjects("FET_STATS_NEXT");
-    if (nextBtn)
+    if (!nextBtn)
     {
-        nextBtn.Text = "[Next]";
-        string nextScript;
-        nextScript = "FET_STATS_NEXT.fsize=16;FET_STATS_NEXT.color=color(37,99,235);"
-                    "FET_STATS_NEXT.background=0;FET_STATS_NEXT.show=1;"
-                    "FET_STATS_NEXT.script$=\"fet_analyzer_stats_next_param();\";"
-                    "FET_STATS_NEXT.script=1;";
-        gl.LT_execute(nextScript);
+        gl.LT_execute("label -p 88 3 -j 1 -n FET_STATS_NEXT [Next];");
+        nextBtn = gl.GraphObjects("FET_STATS_NEXT");
+        if (nextBtn)
+        {
+            nextBtn.Text = "[Next]";
+            gl.LT_execute("FET_STATS_NEXT.fsize=16;FET_STATS_NEXT.color=color(37,99,235);"
+                          "FET_STATS_NEXT.background=0;FET_STATS_NEXT.show=1;"
+                          "FET_STATS_NEXT.script$=\"fet_analyzer_stats_next_param();\";"
+                          "FET_STATS_NEXT.script=1;");
+        }
     }
 
     // Re-assert the same square-page/76%-frame proportions every render:
@@ -4352,6 +4464,7 @@ static bool _fet_render_stats_param(GraphLayer& gl, int paramIndex)
     // against Origin quietly reflowing the layer back to a smaller default.
     // 5.00in page (3000 = 5in * 600 units/in), not the original 7.6in.
     _fet_set_graph_page_ratio(gl, 500, 3000);
+    _fet_write_stats_param_index_tag(gl, paramIndex);
     return true;
 }
 
@@ -4971,6 +5084,100 @@ static bool _fet_get_multi_options(LPCSTR title = "FET Multi-Curve Analysis")
 
     g_fet_dialog_options = options;
     g_fet_dialog_options_initialized = true;
+    return true;
+}
+
+// True only if a field that actually feeds curve fitting (Device Parameters
+// or Fitting branch of the settings dialog, or the analyzed segment) is
+// different -- i.e. re-running _fet_multi_analyze_core over every curve
+// would produce different numbers. The Statistics branch (Show parameter,
+// Bins) never affects fitting, so changing only those must NOT trip this.
+static bool _fet_multi_fit_inputs_changed(const FETDialogOptions& before,
+                                          const FETDialogOptions& after,
+                                          int directionBefore,
+                                          int directionAfter)
+{
+    return before.device.L_um != after.device.L_um
+        || before.device.W_um != after.device.W_um
+        || before.device.Cox_F_cm2 != after.device.Cox_F_cm2
+        || before.device.coxMode != after.device.coxMode
+        || before.device.oxideThickness_nm != after.device.oxideThickness_nm
+        || before.device.oxideKappa != after.device.oxideKappa
+        || before.device.Vd_V != after.device.Vd_V
+        || before.smoothingWindow != after.smoothingWindow
+        || before.ssWindowPoints != after.ssWindowPoints
+        || before.vthWindowPoints != after.vthWindowPoints
+        || before.minFitR2 != after.minFitR2
+        || directionBefore != directionAfter;
+}
+
+// True if [FETStatsData]Parameters/Statistics/Histogram already hold a
+// finished batch run for `bookName`, AND the FETStatsGraph page is still
+// around to redraw into -- the precondition for a display-only update
+// (Show parameter / Bins) to skip curve fitting entirely and just re-read
+// what's already there.
+static bool _fet_multi_stats_ready_for_book(LPCSTR bookName, GraphLayer& outStatsLayer)
+{
+    WorksheetPage statsBook(FET_STATS_DATA_PAGE);
+    if (!statsBook)
+        return false;
+    Worksheet paramsWks = statsBook.Layers("Parameters");
+    Worksheet statsWks = statsBook.Layers("Statistics");
+    Worksheet histWks = statsBook.Layers("Histogram");
+    if (!paramsWks || !statsWks || !histWks || paramsWks.GetNumRows() < 1)
+        return false;
+
+    GraphPage statsGraph(FET_STATS_GRAPH_PAGE);
+    if (!statsGraph)
+        return false;
+    GraphLayer statsLayer = statsGraph.Layers(0);
+    if (!statsLayer)
+        return false;
+
+    string taggedName;
+    if (!_fet_read_source_book_tag(statsLayer, taggedName)
+        || taggedName.CompareNoCase(bookName) != 0)
+        return false;
+
+    outStatsLayer = statsLayer;
+    return true;
+}
+
+// Re-bins every parameter's already-extracted per-curve values (read back
+// from [FETStatsData]Parameters) at the current g_fet_hist_bins, without
+// touching curve fitting at all. Only needed when the Bins field itself
+// changed; a bare Show-parameter change doesn't even need this.
+static bool _fet_multi_rebin_from_parameters()
+{
+    WorksheetPage statsBook(FET_STATS_DATA_PAGE);
+    if (!statsBook)
+        return false;
+    Worksheet paramsWks = statsBook.Layers("Parameters");
+    Worksheet statsWks = statsBook.Layers("Statistics");
+    Worksheet histWks = statsBook.Layers("Histogram");
+    if (!paramsWks || !statsWks || !histWks)
+        return false;
+
+    // pp (0..FET_STATS_PARAM_COUNT-1, the stats/histogram ordering: SS, Vth,
+    // gm, Mobility, Ion, log10(Ion/Ioff)) mapped onto _fet_batch_param_col_name's
+    // wider 0..7 selection (which also has Ioff and Ion/Ioff in between).
+    vector<int> batchIndexForParam = { 0, 1, 2, 3, 4, 7 };
+    int pp;
+    for (pp = 0; pp < FET_STATS_PARAM_COUNT; pp++)
+    {
+        int col;
+        string batchName;
+        _fet_batch_param_col_name(batchIndexForParam[pp], col, batchName);
+        vector vals;
+        _fet_read_batch_param_column(paramsWks, col, vals);
+
+        string paramName, paramUnit, axisTitle;
+        _fet_stats_param_meta(pp, paramName, paramUnit, axisTitle);
+        _fet_stats_compute(histWks, statsWks, pp, paramName, paramUnit, vals,
+                          g_fet_hist_bins);
+    }
+    statsWks.AutoSize();
+    histWks.AutoSize();
     return true;
 }
 
@@ -6095,8 +6302,35 @@ void fet_analyzer_multi_analyze()
                      "analysis.", MB_OK | MB_ICONEXCLAMATION);
         return;
     }
+    // Snapshot everything that could change in the dialog so that, once it
+    // returns, a bare "Show parameter" (or "Bins") change in the Statistics
+    // branch can be told apart from an actual Device/Fitting/segment change.
+    // Only the latter needs every curve re-fit.
+    FETDialogOptions beforeOptions;
+    _fet_get_effective_dialog_options(beforeOptions);
+    int beforeDirection = g_fet_multi_direction;
+    int beforeBins = g_fet_hist_bins;
+
     if (!_fet_get_multi_options())
         return;
+
+    GraphLayer statsLayer;
+    string bookName = book.GetName();
+    bool fitChanged = _fet_multi_fit_inputs_changed(beforeOptions, g_fet_dialog_options,
+                                                     beforeDirection, g_fet_multi_direction);
+    if (!fitChanged && _fet_multi_stats_ready_for_book(bookName, statsLayer))
+    {
+        // Display-only change (Show parameter and/or Bins): re-render from
+        // what's already computed with no re-fit and no confirmation popup,
+        // the same silent, instant update [Prev]/[Next] already give.
+        if (g_fet_hist_bins != beforeBins)
+            _fet_multi_rebin_from_parameters();
+
+        _fet_render_stats_param(statsLayer, g_fet_stats_current_param);
+        set_active_layer(statsLayer);
+        statsLayer.GetPage().Refresh();
+        return;
+    }
 
     string summary;
     int nErr = _fet_multi_analyze_core(book, summary);
@@ -6157,14 +6391,20 @@ int fet_analyzer_correlation_matrix_for_test()
 
 // [Prev]/[Next] button handlers on the statistics graph: only re-render from
 // the already-computed [FETStatsData]Statistics/Histogram sheets, never
-// re-run curve fitting.
+// re-run curve fitting. The current index is read back from the on-graph
+// FET_STATS_PARAM_IDX_TAG (written by _fet_render_stats_param), not from
+// g_fet_stats_current_param, since that in-memory global does not reliably
+// survive between separate button-click invocations -- falling back to it
+// only if the graph predates this tag.
 void fet_analyzer_stats_prev_param()
 {
     GraphLayer gl;
     gl = Project.ActiveLayer();
     if (!gl)
         return;
-    g_fet_stats_current_param = (g_fet_stats_current_param + FET_STATS_PARAM_COUNT - 1)
+    int current = g_fet_stats_current_param;
+    _fet_read_stats_param_index_tag(gl, current);
+    g_fet_stats_current_param = (current + FET_STATS_PARAM_COUNT - 1)
                                % FET_STATS_PARAM_COUNT;
     _fet_render_stats_param(gl, g_fet_stats_current_param);
     gl.GetPage().Refresh();
@@ -6176,9 +6416,66 @@ void fet_analyzer_stats_next_param()
     gl = Project.ActiveLayer();
     if (!gl)
         return;
-    g_fet_stats_current_param = (g_fet_stats_current_param + 1) % FET_STATS_PARAM_COUNT;
+    int current = g_fet_stats_current_param;
+    _fet_read_stats_param_index_tag(gl, current);
+    g_fet_stats_current_param = (current + 1) % FET_STATS_PARAM_COUNT;
     _fet_render_stats_param(gl, g_fet_stats_current_param);
     gl.GetPage().Refresh();
+}
+
+// Test hook: sets the displayed parameter directly (bypassing repeated
+// Prev/Next stepping) for exercising _fet_render_stats_param's actual
+// switch-parameter path in a smoke test.
+int fet_analyzer_stats_set_param_for_test(int paramIndex)
+{
+    GraphLayer gl;
+    gl = Project.ActiveLayer();
+    if (!gl)
+        return 1;
+    if (paramIndex < 0 || paramIndex >= FET_STATS_PARAM_COUNT)
+        return 2;
+    g_fet_stats_current_param = paramIndex;
+    _fet_render_stats_param(gl, g_fet_stats_current_param);
+    gl.GetPage().Refresh();
+    return 0;
+}
+
+// Test hook: reads back the in-memory current-parameter index (as opposed
+// to the on-graph FET_STATS_PARAM_IDX_TAG, which _fet_read_stats_param_index_tag
+// reads) -- lets a headless probe tell the two sources of truth apart.
+int fet_analyzer_stats_current_param_for_test()
+{
+    return g_fet_stats_current_param;
+}
+
+// Test hook: reads FET_STATS_PARAM_IDX_TAG straight off the active layer,
+// the other half of the pair above.
+int fet_analyzer_stats_tag_param_for_test()
+{
+    GraphLayer gl;
+    gl = Project.ActiveLayer();
+    if (!gl)
+        return -1;
+    int idx = -1;
+    if (!_fet_read_stats_param_index_tag(gl, idx))
+        return -1;
+    return idx;
+}
+
+// Test hook: reads back FET_HIST_STAT's Y position (in whatever unit
+// LT_get_var reports for it) off the active layer, to diagnose position
+// drift across repeated re-renders.
+double fet_analyzer_stats_hist_stat_y_for_test()
+{
+    GraphLayer gl;
+    gl = Project.ActiveLayer();
+    if (!gl)
+        return -999;
+    if (!gl.GraphObjects("FET_HIST_STAT"))
+        return -999;
+    double y = -999;
+    LT_get_var("FET_HIST_STAT.y", &y);
+    return y;
 }
 
 // Entry: scatter plot of two batch-result parameters with marginal

@@ -191,13 +191,59 @@ App Gallery
   `[FETStatsData]Statistics`/`Histogram` sheets (so switching parameters
   never re-runs curve fitting), and `[Prev]`/`[Next]` buttons
   (`fet_analyzer_stats_prev_param`/`_next_param`, module-level
-  `g_fet_stats_current_param`, wrapped with `%` so the cycle is closed-loop
-  in both directions) cycle through all 6. `_fet_stats_param_meta` is the
-  single source of truth for each parameter's name/unit/axis title, shared
-  by the data-computation step (`_fet_stats_compute`) and the renderer so
-  the two can't drift out of sync on ordering. `[Prev]`/`[Next]` sit in the
-  bottom corners (`-p 2 3` / `-p 88 3`), not the top-right, so they don't
-  collide with the `[FET Multi]` button which lives at `-p 88 97`.
+  `g_fet_stats_current_param` backed by a hidden `FET_STATS_PARAM_IDX_TAG`
+  text object on the layer for robustness across separate button-click
+  invocations, wrapped with `%` so the cycle is closed-loop in both
+  directions) cycle through all 6. (A button-opens-a-`GETN_LIST`-dropdown
+  "jump to any parameter directly" variant was tried and reverted back to
+  plain `[Prev]`/`[Next]` per explicit user preference.) `_fet_stats_param_meta`
+  is the single source of truth for each parameter's name/unit/axis title,
+  shared by the data-computation step (`_fet_stats_compute`) and the
+  renderer so the two can't drift out of sync on ordering. `layer -a` also
+  auto-adds a legend for the 2-plot (bars + Gaussian) layer, immediately
+  removed with `label -r legend;` in the same script -- not wanted since the
+  color/axis label already identify the series. The N/mean/SD readout
+  (`FET_HIST_STAT`) is a label above the frame acting as the title. THREE
+  earlier attempts at this missed: LabTalk's `-t` switch (the special object
+  literally named `TITLE`) landed top-LEFT instead of Origin auto-centering
+  it; a manual `-p 50 96 -j 1` (hoping `-j 1` would center-justify around
+  x=50) didn't either -- `-j` governs multi-line text alignment WITHIN the
+  object's own box, not which point of the box the (x, y) coordinate anchors
+  to, and for `label -p` that anchor is always the object's own Left-Top
+  corner regardless of `-j` (confirmed via Object Properties > Position tab:
+  Horizontal came back as exactly the input 50, unshifted for the text's
+  rendered width); and even once the target position `(0, -7)` in "% of
+  layer" units (Left-Top anchor, `-j 0`; verified correct by inspecting that
+  same tab -- layer-percent coordinates run top-down from the frame's own
+  top edge, so a negative Y sits in the margin above it) was known, `label
+  -p 0 -7 -j 0 ...` in one shot silently failed to create the object at all,
+  and `label -p 0 (-7) -j 0 ...` created it but at the WRONG position (read
+  back as Y=10.5) -- both confirmed via COM probe. The only combination that
+  actually works: create at a neutral `-p 0 0`, then move it with a
+  follow-up `FET_HIST_STAT.y=-7;` property assignment, an ordinary
+  (negative-safe) numeric expression rather than a positional switch
+  argument. There's no separate "Parameter X / Y: name" header anymore,
+  since `[Prev]`/`[Next]` and the X-axis label already show the parameter
+  name. `[Prev]`/`[Next]` sit in the bottom corners (`-p 2 3` / `-p 88 3`),
+  not the top-right, so they don't collide with the `[FET Multi]` button
+  which lives at `-p 88 97`.
+- **Never delete-and-recreate a GraphObject from inside the click script it
+  is currently running.** `[Prev]`/`[Next]` (and, briefly, a button-based
+  parameter picker that replaced and was later reverted back to them) used
+  to call `_fet_delete_graph_object` then recreate themselves on every
+  render, including the render triggered BY clicking that exact button --
+  destroying a GraphObject mid-click leaves Origin's click routing on that
+  layer wedged, so the button stops responding to further clicks until some
+  other window is activated and this one reactivated. This turned out to be
+  the actual root cause of what looked like several different "Prev/Next is
+  stuck" symptoms reported over this feature's history.
+  `_fet_render_stats_param` (and the title label above) now creates each
+  GraphObject once (`if (!obj) { create }`) and only updates `.Text`/style
+  on later renders, matching the create-once pattern `_fet_add_multi_button`
+  already used for `[FET Multi]` (which never showed this symptom). This
+  live click-routing behavior isn't independently verifiable via headless
+  COM read-backs -- only the structural fix (no delete call on the hot
+  path) is.
 - **Page sizing root cause**: `GraphPage.Resize(w, h, 101)` only sets an
   initial GDI size hint. The actual final page size is a *separate*,
   absolute-unit LabTalk aspect-lock -- `page.kar=0;page.width=N;page.height=N;`

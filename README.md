@@ -114,6 +114,9 @@ buttons for **Import**, **Single-Curve Analysis**, and **Multi-Curve Analysis**,
 **More...** button that opens a second dialog with **Scatter + Histograms** and
 **Correlation Matrix**.
 
+**Demo videos:** 🎬 [Import & single-curve analysis](asset/import-and-single-curve-analyze.mp4) ·
+🎬 [Multi-curve analysis](asset/multicurve-analyze.mp4)
+
 ### Import
 
 Pick one or more CSV files.

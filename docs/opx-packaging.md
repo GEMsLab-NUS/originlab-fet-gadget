@@ -16,6 +16,8 @@
 
 Origin 官方 App 开发流程要求先生成并安装一次 OPX，App Gallery 才能正常管理和启动该 App。后续修改应从 Code Builder workspace 中的 App 文件夹再次执行 **Generate...**，不要直接打开旧 OPX 修改。
 
+**`package.ini` 的 `[Package] Version` 必须是最多两位小数的纯数字**（OriginLab 官方文档示例：`1.11`），不支持三段式语义化版本号（如 `0.11.0`）——用三段式会导致 App Gallery 里版本号显示错乱（例如 `v-0.00`）。仓库里更细粒度的三段式版本号只保留在 `FETAnalyzer.c` 的 `FET_APP_TITLE`（对话框标题里显示）和 commit message 里；`package.ini` 的 `Version` 每次发布只需递增到下一个两位小数（如 `0.12`、`0.13`），不必和 `FET_APP_TITLE` 的补丁号一一对应。
+
 ## 发布前 X-Function 步骤
 
 MVP 不依赖 `.OXF` 即可运行。若要发布稳定的脚本/Analysis Template API：
