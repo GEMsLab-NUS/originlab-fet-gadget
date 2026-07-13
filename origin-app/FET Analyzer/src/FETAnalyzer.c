@@ -220,6 +220,30 @@ static void _fet_default_device_options(FETOptions& options)
     options.Vd_V = 1.0;
 }
 
+static void _fet_sync_cox_input_enables(TreeNode& device)
+{
+    int coxMode = device.CoxMode.nVal;
+    device.OxideThickness.Enable = coxMode == FET_COX_DIRECT ? 0 : 1;
+    device.Kappa.Enable = coxMode == FET_COX_MANUAL_KAPPA ? 1 : 0;
+    device.Cox.Enable = coxMode == FET_COX_DIRECT ? 1 : 0;
+}
+
+static int _fet_device_options_dialog_event(TreeNode& tr, int nRow, int nEvent,
+                                            DWORD& dwEnables,
+                                            LPCSTR lpcszNodeName,
+                                            WndContainer& getNContainer,
+                                            string& strAux,
+                                            string& strErrMsg)
+{
+    string strNode = lpcszNodeName;
+    if (nEvent == GETNE_ON_INIT || strNode == "CoxMode")
+    {
+        _fet_sync_cox_input_enables(tr.device);
+        return 1;
+    }
+    return 0;
+}
+
 static double _fet_kappa_for_cox_mode(int mode, double manualKappa)
 {
     if (mode == FET_COX_HFOX)
@@ -5028,14 +5052,9 @@ static bool _fet_get_multi_options(LPCSTR title = "FET Multi-Curve Analysis")
         GETN_LIST(ShowParam, "Show parameter", g_fet_stats_current_param, "SS|Vth|gm|Mobility|Ion|log10(Ion/Ioff)")
     GETN_END_BRANCH(stats)
 
-    settings.device.OxideThickness.Enable =
-        options.device.coxMode == FET_COX_DIRECT ? 0 : 1;
-    settings.device.Kappa.Enable =
-        options.device.coxMode == FET_COX_MANUAL_KAPPA ? 1 : 0;
-    settings.device.Cox.Enable =
-        options.device.coxMode == FET_COX_DIRECT ? 1 : 0;
+    _fet_sync_cox_input_enables(settings.device);
 
-    if (!GetNBox(settings, title))
+    if (!GetNBox(settings, _fet_device_options_dialog_event, title))
         return false;
 
     options.device.L_um = settings.device.L_um.dVal;
@@ -5940,16 +5959,11 @@ static bool _fet_get_dialog_options(FETDialogOptions& options,
     settings.extract.IonMethod.Enable = 0;
     settings.cursors.SSRange.Enable = 0;
     settings.cursors.VthRange.Enable = 0;
-    settings.device.OxideThickness.Enable =
-        options.device.coxMode == FET_COX_DIRECT ? 0 : 1;
-    settings.device.Kappa.Enable =
-        options.device.coxMode == FET_COX_MANUAL_KAPPA ? 1 : 0;
-    settings.device.Cox.Enable =
-        options.device.coxMode == FET_COX_DIRECT ? 1 : 0;
+    _fet_sync_cox_input_enables(settings.device);
     settings.graph.LeftAxis.Enable = 0;
     settings.graph.RightAxis.Enable = 0;
 
-    if (!GetNBox(settings, title))
+    if (!GetNBox(settings, _fet_device_options_dialog_event, title))
         return false;
 
     options.device.L_um = settings.device.L_um.dVal;
