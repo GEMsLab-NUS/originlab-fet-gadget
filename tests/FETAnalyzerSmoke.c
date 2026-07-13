@@ -9,6 +9,7 @@ int fet_import_transfer_csv_files(LPCSTR lpcszFiles, TreeNode& resultTree,
 int fet_import_transfer_csv_files_ex(LPCSTR lpcszFiles, TreeNode& resultTree,
                                      bool makeGraph, bool multiStyle);
 int fet_analyzer_multi_analyze_for_test(LPCSTR lpcszBook);
+int fet_analyzer_sync_parameter_masks_for_test();
 int fet_analyzer_find_multi_source_book_curve_count_for_test();
 void fet_analyzer_stats_prev_param();
 void fet_analyzer_stats_next_param();
@@ -108,6 +109,24 @@ static int _fet_smoke_find_summary_row(Worksheet& wks, LPCSTR key)
             return rr;
     }
     return -1;
+}
+
+static bool _fet_smoke_column_mask_all(Worksheet& wks, int colIndex,
+                                       bool expectedMasked)
+{
+    DatasetObject ds(wks.Columns(colIndex));
+    if (!ds)
+        return false;
+    vector<byte> mask;
+    ds.GetMask(mask);
+    int rows = wks.GetNumRows();
+    for (int rr = 0; rr < rows; rr++)
+    {
+        bool masked = rr < mask.GetSize() && mask[rr];
+        if (masked != expectedMasked)
+            return false;
+    }
+    return true;
 }
 
 string g_fet_smoke_csv_path;
@@ -299,8 +318,10 @@ int fet_analyzer_runtime_smoke()
         return 100 + err;
     if (fabs(result.SS.dVal - 1000.045) > 1.0)
         return 201;
-    if (fabs(result.Vth.dVal - 0.23937) > 0.01)
+    if (fabs(result.Vthgm.dVal - 0.23937) > 0.01)
         return 202;
+    if (fabs(result.Vthcc.dVal - 0.0075) > 0.01)
+        return 206;
     if (fabs(result.Mobility.dVal - 35.6522) > 0.1)
         return 203;
     if (!gl.GraphObjects("FET_SUMMARY"))
@@ -451,8 +472,21 @@ int fet_analyzer_runtime_smoke()
         Worksheet overlayCurves = statsBook.Layers("OverlayCurves");
         if (!statsParams || !statsSummary || !statsHist || !overlayCurves)
             return 776;
+        if (statsParams.Columns(4).GetLongName().CompareNoCase("Vthgm") != 0
+            || statsParams.Columns(5).GetLongName().CompareNoCase("Vthcc") != 0)
+            return 813;
         if (overlayCurves.GetNumCols() != 12)
             return 784;
+        for (int oc = 0; oc < 3; oc++)
+        {
+            int baseCol = oc * 4;
+            string label = overlayCurves.Columns(baseCol).GetComments();
+            if (label.IsEmpty()
+                || overlayCurves.Columns(baseCol + 1).GetComments().CompareNoCase(label) != 0
+                || overlayCurves.Columns(baseCol + 2).GetComments().CompareNoCase(label) != 0
+                || overlayCurves.Columns(baseCol + 3).GetComments().CompareNoCase(label) != 0)
+                return 805;
+        }
         StringArray statsCurveNames;
         statsParams.Columns(0).GetStringArray(statsCurveNames);
         int statsRows = 0;
@@ -515,25 +549,25 @@ int fet_analyzer_runtime_smoke()
         // straight to an arbitrary parameter (bypassing repeated
         // Prev/Next stepping) without going through [Prev]/[Next] at all;
         // exercise it directly, then reset to 0 before the lap tests below.
-        if (fet_analyzer_stats_set_param_for_test(3) != 0)
+        if (fet_analyzer_stats_set_param_for_test(4) != 0)
             return 840;
-        if (fet_analyzer_stats_current_param_for_test() != 3)
+        if (fet_analyzer_stats_current_param_for_test() != 4)
             return 841;
         if (fet_analyzer_stats_set_param_for_test(0) != 0)
             return 842;
 
         // Regression guard: repeated same-direction clicks must keep
-        // advancing through ALL 6 parameters (not get wedged after the first
+        // advancing through ALL 7 parameters (not get wedged after the first
         // click -- an earlier version of these buttons deleted-and-recreated
         // themselves on every render, including the render triggered by
         // their own click, which corrupts Origin's click routing on that
-        // layer). A full lap of 6x [Prev] must visit 5,4,3,2,1,0 in that
-        // order and land back where it started, then a full lap of 6x
-        // [Next] must visit 1,2,3,4,5,0 -- the button objects must still
+        // layer). A full lap of 7x [Prev] must visit 6,5,4,3,2,1,0 in that
+        // order and land back where it started, then a full lap of 7x
+        // [Next] must visit 1,2,3,4,5,6,0 -- the button objects must still
         // exist after every single click, not just the first.
-        vector<int> expectedPrev = {5, 4, 3, 2, 1, 0};
+        vector<int> expectedPrev = {6, 5, 4, 3, 2, 1, 0};
         int pn;
-        for (pn = 0; pn < 6; pn++)
+        for (pn = 0; pn < 7; pn++)
         {
             fet_analyzer_stats_prev_param();
             if (!statsLayer.GraphObjects("FET_STATS_PREV")
@@ -542,9 +576,9 @@ int fet_analyzer_runtime_smoke()
             if (fet_analyzer_stats_current_param_for_test() != expectedPrev[pn])
                 return 850 + pn;
         }
-        vector<int> expectedNext = {1, 2, 3, 4, 5, 0};
+        vector<int> expectedNext = {1, 2, 3, 4, 5, 6, 0};
         int nn;
-        for (nn = 0; nn < 6; nn++)
+        for (nn = 0; nn < 7; nn++)
         {
             fet_analyzer_stats_next_param();
             if (!statsLayer.GraphObjects("FET_STATS_PREV")
@@ -556,6 +590,8 @@ int fet_analyzer_runtime_smoke()
         GraphObject statsTitleFullLap = statsLayer.GraphObjects("FET_HIST_STAT");
         if (statsTitleFullLap.Text.Find("N =") < 0)
             return 839;
+        if (!statsLayer.GraphObjects("FET_SYNC_MASKS"))
+            return 806;
 
         // Regression guard: clicking [FET Multi] from either graph must
         // resolve back to the 3-curve source workbook -- both graphs plot
@@ -577,6 +613,7 @@ int fet_analyzer_runtime_smoke()
         if (!multiLeft || !multiRight)
             return 786;
         if (!multiLeft.GraphObjects("FET_MULTI")
+            || !multiLeft.GraphObjects("FET_SYNC_MASKS")
             || multiLeft.GraphObjects("FET_LEGEND")
             || multiLeft.GraphObjects("FET_CONFIG"))
             return 787;
@@ -603,6 +640,32 @@ int fet_analyzer_runtime_smoke()
         if (fet_analyzer_find_multi_source_book_curve_count_for_test() != 3)
             return 796;
 
+        string maskedCurveName = statsCurveNames[0];
+        DatasetObject paramMask(statsParams.Columns(0));
+        paramMask.SetMask(0, 0, false, false);
+        if (fet_analyzer_sync_parameter_masks_for_test() < 1)
+            return 807;
+        for (int ocMask = 0; ocMask < 3; ocMask++)
+        {
+            int baseCol = ocMask * 4;
+            bool shouldMask = overlayCurves.Columns(baseCol).GetComments().CompareNoCase(maskedCurveName) == 0;
+            for (int offset = 0; offset < 4; offset++)
+            {
+                if (!_fet_smoke_column_mask_all(overlayCurves, baseCol + offset, shouldMask))
+                    return 808;
+            }
+        }
+        vector<byte> clearParamMask(statsParams.GetNumRows());
+        clearParamMask = 0;
+        paramMask.SetMask(clearParamMask, true, false);
+        if (fet_analyzer_sync_parameter_masks_for_test() < 1)
+            return 809;
+        for (int clearCol = 0; clearCol < overlayCurves.GetNumCols(); clearCol++)
+        {
+            if (!_fet_smoke_column_mask_all(overlayCurves, clearCol, false))
+                return 811;
+        }
+
         // Scatter + marginal histograms and the correlation matrix both read
         // [FETStatsData]Parameters directly rather than re-fitting curves.
         // The real multi-curve fixture above only ever produces one
@@ -616,23 +679,41 @@ int fet_analyzer_runtime_smoke()
             syntheticParams = syntheticStatsBook.Layers("Parameters");
         if (!syntheticParams)
             return 797;
-        syntheticParams.SetSize(4, 12);
+        syntheticParams.SetSize(4, 13);
         for (int synRow = 0; synRow < 4; synRow++)
         {
             syntheticParams.SetCell(synRow, 0, "SynthCurve");
             syntheticParams.SetCell(synRow, 1, "+");
             syntheticParams.SetCell(synRow, 2, 80.0 + synRow * 5);
             syntheticParams.SetCell(synRow, 4, 0.2 + synRow * 0.05);
-            syntheticParams.SetCell(synRow, 6, 10.0 + synRow);
-            syntheticParams.SetCell(synRow, 7, 30.0 + synRow * 2);
-            syntheticParams.SetCell(synRow, 8, 5.0 + synRow);
-            syntheticParams.SetCell(synRow, 9, 0.001);
-            syntheticParams.SetCell(synRow, 10, 5000.0);
-            syntheticParams.SetCell(synRow, 11, 3.7);
+            syntheticParams.SetCell(synRow, 5, 0.25 + synRow * 0.04);
+            syntheticParams.SetCell(synRow, 7, 10.0 + synRow);
+            syntheticParams.SetCell(synRow, 8, 30.0 + synRow * 2);
+            syntheticParams.SetCell(synRow, 9, 5.0 + synRow);
+            syntheticParams.SetCell(synRow, 10, 0.001);
+            syntheticParams.SetCell(synRow, 11, 5000.0);
+            syntheticParams.SetCell(synRow, 12, 3.7);
         }
+        DatasetObject syntheticParamMask(syntheticParams.Columns(0));
+        syntheticParamMask.SetMask(1, 1, false, false);
 
-        if (fet_analyzer_scatter_hist_for_test(4, 0) != 0)
+        if (fet_analyzer_scatter_hist_for_test(5, 0) != 0)
             return 798;
+        WorksheetPage oldScatterData("FETScatterData");
+        if (oldScatterData)
+            return 814;
+        Worksheet scatterSource = syntheticStatsBook.Layers("Ion-SS");
+        if (!scatterSource || scatterSource.GetNumCols() != 3)
+            return 815;
+        if (scatterSource.Columns(0).GetLongName().CompareNoCase("Name") != 0
+            || scatterSource.Columns(1).GetLongName().CompareNoCase("Ion") != 0
+            || scatterSource.Columns(2).GetLongName().CompareNoCase("SS") != 0)
+            return 816;
+        DatasetObject scatterMask(scatterSource.Columns(1));
+        vector<byte> scatterMaskVals;
+        scatterMask.GetMask(scatterMaskVals);
+        if (scatterMaskVals.GetSize() < 2 || !scatterMaskVals[1])
+            return 817;
         GraphPage scatterGraph("FETScatterGraph");
         if (!scatterGraph || scatterGraph.Layers.Count() != 3)
             return 799;
