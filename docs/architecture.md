@@ -36,7 +36,7 @@ App Gallery
               OverlayCurves
            -> FETStatsGraph: one-parameter-at-a-time histogram with a
               scaled normal-distribution overlay, [Prev]/[Next] buttons
-              cycle (closed-loop) through all 6 parameters
+              cycle (closed-loop) through all 7 parameters
            -> FETMultiOverlayGraph: log+linear overlay, built together
               with the histograms in the same pass
       -> Scatter + Histograms:
@@ -44,12 +44,11 @@ App Gallery
               Multi-Curve Analysis at least once first) -- no curve
               re-fitting, reads batch results directly
            -> settings dialog: 2 dropdowns (X parameter, Y parameter)
-           -> tries Origin's native "Marginal Histograms" plot_marginal
-              X-Function first; falls back to a hand-built 3-layer graph
-              (main scatter + marginal histogram per axis) if that doesn't
-              produce a real result -- either way ends up named
-              FETScatterGraph (see "Scatter + Marginal Histograms and
-              Correlation Matrix")
+           -> rebuilds a synced 3-column source sheet inside FETStatsData,
+              named from the selected pair (for example SS-Mobility):
+              Name, X, Y; row masks are copied from Parameters by curve name
+           -> builds a hand-built 3-layer graph (main scatter + marginal
+              histogram per axis) named FETScatterGraph
       -> Correlation Matrix:
            -> also requires [FETStatsData]Parameters
            -> settings dialog: checkboxes, which parameters to include
@@ -173,9 +172,9 @@ App Gallery
   button (`[FET Multi]`) that re-runs `fet_analyzer_multi_analyze()` using
   its own source workbook.
 - Outputs are singletons, rebuilt per run: `[FETStatsData]Parameters` (one row
-  per analyzed curve: SS, R2s, Vth, gm in uS, mobility, Ion/Ioff densities in
-  uA/um, ratio and log10 ratio), `[FETStatsData]Statistics` (N/mean/SD/median/
-  min/max/CV per parameter, one row per of the 6 parameters), and
+  per analyzed curve: SS, R2s, Vthgm, Vthcc, gm in uS, mobility, Ion/Ioff
+  densities in uA/um, ratio and log10 ratio), `[FETStatsData]Statistics`
+  (N/mean/SD/median/min/max/CV per parameter, one row per of the 7 parameters), and
   `[FETStatsData]Histogram` (bin centers/counts plus normal-curve samples, 4
   columns per parameter). Histogram bins default to the sqrt rule clamped to
   [4, 15]; the normal overlay is scaled by `N * binWidth` so it sits directly
@@ -194,7 +193,7 @@ App Gallery
   `g_fet_stats_current_param` backed by a hidden `FET_STATS_PARAM_IDX_TAG`
   text object on the layer for robustness across separate button-click
   invocations, wrapped with `%` so the cycle is closed-loop in both
-  directions) cycle through all 6. (A button-opens-a-`GETN_LIST`-dropdown
+  directions) cycle through all 7. (A button-opens-a-`GETN_LIST`-dropdown
   "jump to any parameter directly" variant was tried and reverted back to
   plain `[Prev]`/`[Next]` per explicit user preference.) `_fet_stats_param_meta`
   is the single source of truth for each parameter's name/unit/axis title,
@@ -311,64 +310,50 @@ App Gallery
 - Both read `[FETStatsData]Parameters` directly rather than re-fitting
   curves -- they're cross-parameter analyses over batch results that must
   already exist (Multi-Curve Analysis has to have run at least once).
-  `_fet_batch_param_col_name` maps an 8-entry selection index (SS, Vth, gm,
-  Mobility, Ion, Ioff, Ion/Ioff, log10(Ion/Ioff)) to its `Parameters` column;
+  `_fet_batch_param_col_name` maps a 9-entry selection index (SS, Vthgm,
+  Vthcc, gm, Mobility, Ion, Ioff, Ion/Ioff, log10(Ion/Ioff)) to its
+  `Parameters` column;
   `_fet_read_batch_param_pair` reads two columns index-aligned to the same
   curve, skipping rows with an empty `Curve` name (padding) or either value
   missing.
-- Both first try Origin's own built-in graph-gallery template via its
-  X-Function, and only fall back to a hand-built equivalent if that doesn't
-  produce a real result. This "try native, then fall back" design exists
-  because `plot_marginal`/`plotmatrix` behaved *inconsistently* under
-  headless COM automation in this session's testing: neither the
-  X-Function's own success/failure signal (`LT_execute()`'s return value)
-  nor comparing `Project.ActiveLayer()`'s page name against the source book
-  reliably indicated whether a correct graph was actually built --
-  `plot_marginal` was observed returning `LT_execute()==false` while still
-  building a fully correct 3-layer graph (a false negative), and `plotmatrix`
-  was observed returning `LT_execute()==true` while only emitting several
-  junk single-layer throwaway pages instead of one real matrix grid (a false
-  positive). The only check proven reliable by probing: snapshot every
-  `GraphPage` name before the call
+- Scatter + Histograms deliberately uses the hand-built graph path so its
+  visible source data can remain in `FETStatsData` instead of creating a
+  separate `FETScatterData` workbook. `_fet_build_scatter_source_sheet`
+  rebuilds a three-column sheet named from the selected pair (`X-Y`, e.g.
+  `SS-Mobility`) with `Name`, X, and Y. It reads the current
+  `[FETStatsData]Parameters` rows by curve name, so user sorting in
+  `Parameters` does not break the pairing, and copies the row mask state to
+  all three source columns.
+- Correlation Matrix still tries Origin's own built-in graph-gallery
+  template via the `plotmatrix` X-Function before falling back to a
+  hand-built table. Headless probing showed a failed/degenerate plotmatrix
+  call can report `LT_execute()==true` while only emitting several junk
+  single-layer throwaway pages instead of one real matrix grid. The reliable
+  check is to snapshot every `GraphPage` name before the call
   (`_fet_snapshot_graph_page_names`), diff after, and judge each newly
   created page by its **shape** (`GraphPage.Layers.Count()`), not just its
-  existence -- `_fet_pick_new_graph_page(before, minLayers, &graphName)`
-  picks the new page with the highest layer count, requires it to clear
-  `minLayers` (3 for the marginal-histogram main+2-margins shape; roughly
-  the selected parameter count for a scatter-matrix grid), and destroys
-  every OTHER newly created page either way so a degenerate X-Function call
-  never leaves clutter pages behind. On success, `_fet_rename_graph_page_to`
-  renames the X-Function's auto-generated page name to this App's fixed page
-  name (destroying any stale page already occupying it first), so downstream
-  code (re-running the same operation, the `[FET Multi]`-style source-book
-  tag pattern, tests) can find "the" scatter/correlation graph by a fixed
-  name regardless of which path built it. Because this behavior wasn't
-  confirmed the same way in a live interactive Origin session, treat the
-  native path as "should generally work, hand-built fallback is the safety
-  net" rather than guaranteed.
+  existence. `_fet_pick_new_graph_page(before, minLayers, &graphName)` picks
+  the new page with the highest layer count, requires it to clear
+  `minLayers`, and destroys every OTHER newly created page either way so a
+  degenerate X-Function call never leaves clutter pages behind. On success,
+  `_fet_rename_graph_page_to` renames the X-Function's auto-generated page
+  name to this App's fixed page name (destroying any stale page already
+  occupying it first), so downstream code can find `FETCorrelationGraph`.
 - `fet_analyzer_scatter_hist` / `_fet_get_scatter_options`: two `GETN_LIST`
   dropdowns pick the X and Y parameter. `_fet_build_scatter_hist_graph`
-  first tries `plot_marginal` (`_fet_try_native_marginal_plot`, Origin's
-  native "Marginal Histograms" gallery template); if that doesn't clear the
-  3-layer bar above, `_fet_build_scatter_hist_graph_fallback` builds
-  `FETScatterGraph` by hand instead: a main scatter (bottom-left,
-  `IDM_PLOT_SCATTER`) plus one marginal histogram per axis, aligned to the
-  main layer's own autoscaled range. The main layer is autoscaled first via
-  `layer -a;`, then its `layer.x.from/to`/`layer.y.from/to` are read back
-  (`LT_get_var`) and applied to the top (X) and right (Y) marginal layers so
-  all three visually line up -- rather than relying on any shared-axis
-  mechanism. The top panel uses `IDM_PLOT_COLUMN` (vertical bars, X=bin
-  center/Y=count, the same type the statistics graph's histograms use); the
-  right panel uses `IDM_PLOT_BAR` with the *same* column roles (X=count,
-  Y=bin center) for the "rotated" horizontal-bar look -- `IDM_PLOT_BAR`'s
-  exact orientation isn't independently visually confirmed, only that it
-  compiles and produces a valid plot object, so if it renders unexpectedly
-  the fix is switching that one panel to a swapped-axis `IDM_PLOT_LINE`
-  density curve instead (a lower-risk fallback that was scoped out only for
-  time, not correctness). `_fet_graph_add_layer` (the layer-adding helper
-  originally written for the six-panel stats grid, since renamed and kept
-  for this) adds the two marginal layers.
-- `fet_analyzer_correlation_matrix` / `_fet_get_correlation_options`: 8
+  uses columns 2/3 of the paired `X-Y` source sheet for the main scatter
+  (`IDM_PLOT_SCATTER`). Histogram bin data is written to an internal
+  `X-Y-Hist` helper sheet in the same `FETStatsData` workbook so the public
+  source sheet stays at exactly three main columns. The main layer is
+  autoscaled first via `layer -a;`, then its `layer.x.from/to`/
+  `layer.y.from/to` are read back (`LT_get_var`) and applied to the top (X)
+  and right (Y) marginal layers so all three visually line up -- rather than
+  relying on any shared-axis mechanism. The top panel uses `IDM_PLOT_COLUMN`
+  (vertical bars, X=bin center/Y=count, the same type the statistics graph's
+  histograms use); the right panel uses `IDM_PLOT_BAR` with X=count and
+  Y=bin center for the horizontal-bar look. `_fet_graph_add_layer` adds the
+  two marginal layers.
+- `fet_analyzer_correlation_matrix` / `_fet_get_correlation_options`: 9
   `GETN_CHECK` boxes pick which parameters to include (>=2 required).
   `_fet_build_correlation_matrix` first tries `plotmatrix`
   (`_fet_try_native_scatter_matrix`, Origin's native "Scatter Matrix"
@@ -427,15 +412,14 @@ App Gallery
 ## Remaining Extensions
 
 1. Persist graph-specific settings in graph-object storage or page tree.
-2. Add constant-current and maximum-gm Vth methods.
+2. Add maximum-gm-only Vth variants beyond the current Vthgm/Vthcc outputs.
 3. Add gate leakage analysis from `Ig`.
 4. Add batch report export.
-5. Confirm in a live interactive Origin session whether `plot_marginal`/
-   `plotmatrix` actually produce their native gallery templates (headless
-   COM testing this session could only confirm the *detection* logic is
-   sound, not that the native templates render correctly end-to-end) --
-   see "Scatter + Marginal Histograms and Correlation Matrix". If the
-   native `plotmatrix` path never clears the layer-count bar in practice,
+5. Confirm in a live interactive Origin session whether `plotmatrix`
+   actually produces its native gallery template (headless COM testing this
+   session could only confirm the *detection* logic is sound, not that the
+   native template renders correctly end-to-end). If the native `plotmatrix`
+   path never clears the layer-count bar in practice,
    the hand-built Pearson coefficient table remains the permanent fallback,
    and a color-coded heatmap would need its own follow-up API investigation.
 6. Confirm `IDM_PLOT_BAR`'s rendered orientation on a live Origin session and

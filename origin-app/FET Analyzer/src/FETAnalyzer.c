@@ -18,6 +18,7 @@
 #define FET_LAUNCH_MULTI_ANALYZE 3
 #define FET_LAUNCH_SCATTER_HIST 4
 #define FET_LAUNCH_CORRELATION_MATRIX 5
+#define FET_LAUNCH_SYNC_PARAMETER_MASKS 6
 #define FET_AUTO_RANGE_MAX_POINTS 30
 #define FET_CURSOR_SS_START "FET_SS_START"
 #define FET_CURSOR_SS_END "FET_SS_END"
@@ -49,15 +50,15 @@
 #define FET_HYST_SUMMARY "FET_HYST_SUMMARY"
 #define FET_GRAPH_DATA_PAGE "FETGraphData"
 #define FET_MULTI_BUTTON "FET_MULTI"
+#define FET_SYNC_MASK_BUTTON "FET_SYNC_MASKS"
 #define FET_MULTI_PROGRESS_LABEL "FET_PROGRESS"
 #define FET_SOURCE_BOOK_TAG "FET_SRC_BOOK"
 #define FET_STATS_PARAM_IDX_TAG "FET_STATS_PARAM_IDX"
 #define FET_STATS_DATA_PAGE "FETStatsData"
 #define FET_STATS_GRAPH_PAGE "FETStatsGraph"
 #define FET_MULTI_OVERLAY_GRAPH_PAGE "FETMultiOverlayGraph"
-#define FET_STATS_PARAM_COUNT 6
-#define FET_BATCH_PARAM_COUNT 8
-#define FET_SCATTER_DATA_PAGE "FETScatterData"
+#define FET_STATS_PARAM_COUNT 7
+#define FET_BATCH_PARAM_COUNT 9
 #define FET_SCATTER_GRAPH_PAGE "FETScatterGraph"
 #define FET_CORRELATION_GRAPH_PAGE "FETCorrelationGraph"
 
@@ -79,6 +80,8 @@ typedef struct tagFETResult
     double ss_intercept;
     double ss_r2;
     double vth_V;
+    double vth_cc_V;
+    double vth_cc_current_density_uA_um;
     double vth_slope_A_V;
     double vth_intercept_A;
     double vth_r2;
@@ -147,6 +150,7 @@ typedef struct tagFETDialogOptions
     int smoothingWindow;
     int ssWindowPoints;
     int vthWindowPoints;
+    double vthCcCurrentDensity_uA_um;
     double minFitR2;
     int logCurveColor;
     int linearCurveColor;
@@ -1977,6 +1981,59 @@ static bool _fet_extract_vth(const XYRange& vthRange, FETResult& result)
     return true;
 }
 
+static bool _fet_find_vg_at_abs_current(const vector& vx, const vector& vy,
+                                        double targetCurrent_A, double& vg)
+{
+    int n = min(vx.GetSize(), vy.GetSize());
+    if (n < 2 || !_fet_valid_number(targetCurrent_A) || targetCurrent_A <= 0)
+        return false;
+
+    for (int ii = 0; ii < n - 1; ii++)
+    {
+        double y1 = fabs(vy[ii]);
+        double y2 = fabs(vy[ii + 1]);
+        if (!_fet_valid_number(y1) || !_fet_valid_number(y2))
+            continue;
+        double d1 = y1 - targetCurrent_A;
+        double d2 = y2 - targetCurrent_A;
+        if (d1 == 0)
+        {
+            vg = vx[ii];
+            return true;
+        }
+        if (d1 * d2 <= 0 && fabs(y2 - y1) > 1e-30)
+        {
+            double fraction = (targetCurrent_A - y1) / (y2 - y1);
+            vg = vx[ii] + fraction * (vx[ii + 1] - vx[ii]);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void _fet_extract_vth_cc(const XYRange& input,
+                                const FETOptions& options,
+                                FETResult& result)
+{
+    result.vth_cc_V = NANUM;
+    double width_um = options.W_um;
+    FETDialogOptions dialogOptions;
+    _fet_get_effective_dialog_options(dialogOptions);
+    result.vth_cc_current_density_uA_um =
+        dialogOptions.vthCcCurrentDensity_uA_um;
+    if (width_um <= 0 || result.vth_cc_current_density_uA_um <= 0)
+        return;
+
+    vector vx, vy, smoothY;
+    if (!_fet_get_xy(input, vx, vy))
+        return;
+    _fet_smooth_vector(vy, dialogOptions.smoothingWindow, smoothY);
+    double target_A = result.vth_cc_current_density_uA_um * width_um / 1.0e6;
+    double vg = NANUM;
+    if (_fet_find_vg_at_abs_current(vx, smoothY, target_A, vg))
+        result.vth_cc_V = vg;
+}
+
 static bool _fet_extract_curve_metrics(const XYRange& input,
                                        const FETOptions& options,
                                        FETResult& result)
@@ -2605,6 +2662,39 @@ static void _fet_add_multi_button(GraphLayer& gl)
     script += FET_MULTI_BUTTON;
     script += ".script$=\"fet_analyzer_multi_analyze();\";";
     script += FET_MULTI_BUTTON;
+    script += ".script=1;";
+    gl.LT_execute(script);
+}
+
+static void _fet_add_sync_mask_button(GraphLayer& gl)
+{
+    if (!gl)
+        return;
+
+    set_active_layer(gl);
+    GraphObject button = gl.GraphObjects(FET_SYNC_MASK_BUTTON);
+    if (!button)
+    {
+        gl.LT_execute("label -p 73 97 -j 1 -n FET_SYNC_MASKS [Sync Masks];");
+        button = gl.GraphObjects(FET_SYNC_MASK_BUTTON);
+    }
+    if (!button)
+        return;
+
+    button.Text = "[Sync Masks]";
+
+    string script;
+    script += FET_SYNC_MASK_BUTTON;
+    script += ".fsize=9;";
+    script += FET_SYNC_MASK_BUTTON;
+    script += ".color=color(37,99,235);";
+    script += FET_SYNC_MASK_BUTTON;
+    script += ".background=0;";
+    script += FET_SYNC_MASK_BUTTON;
+    script += ".show=1;";
+    script += FET_SYNC_MASK_BUTTON;
+    script += ".script$=\"fet_analyzer_sync_parameter_masks();\";";
+    script += FET_SYNC_MASK_BUTTON;
     script += ".script=1;";
     gl.LT_execute(script);
 }
@@ -3661,9 +3751,14 @@ static bool _fet_add_graph_output(GraphLayer& gl, const XYRange& input,
         return false;
     string report;
     double densityFactor = options.W_um > 0 ? 1.0e6 / options.W_um : 1.0e6;
-    report.Format("\\b(%s)\nSS\t%.3g mV/dec\nV\\-(th)\t%.4g V\ng\\-(m)\t%.4g S\n\\g(m)\\-(FE)\t%.4g cm\\+(2)/(V\\x(00B7)s)\nI\\-(on)\t%.4g uA/um\nI\\-(off)\t%.4g uA/um\nI\\-(on)/I\\-(off)\t%.3g",
+    string vthccText;
+    if (_fet_valid_number(result.vth_cc_V))
+        vthccText.Format("%.4g V", result.vth_cc_V);
+    else
+        vthccText = "N/A";
+    report.Format("\\b(%s)\nSS\t%.3g mV/dec\nV\\-(thgm)\t%.4g V\nV\\-(thcc)\t%s\ng\\-(m)\t%.4g S\n\\g(m)\\-(FE)\t%.4g cm\\+(2)/(V\\x(00B7)s)\nI\\-(on)\t%.4g uA/um\nI\\-(off)\t%.4g uA/um\nI\\-(on)/I\\-(off)\t%.3g",
                   backward ? "[-]" : "[+]", result.ss_mV_dec,
-                  result.vth_V, result.gm_S, result.mobility_cm2_Vs,
+                  result.vth_V, vthccText, result.gm_S, result.mobility_cm2_Vs,
                   result.ion_A * densityFactor,
                   result.ioff_A * densityFactor, result.ion_ioff);
     label.Text = report;
@@ -3749,25 +3844,25 @@ static bool _fet_add_preview_output(GraphLayer& gl, const XYRange& ssRange,
 
 static Worksheet _fet_summary_sheet()
 {
-    Worksheet wks = _fet_graph_data_sheet("Extracted Parameters", 34, false);
+    Worksheet wks = _fet_graph_data_sheet("Extracted Parameters", 36, false);
     if (!wks)
         return wks;
 
     vector<string> names = {
         "Graph", "Source Range", "SS Range", "Vth Range", "SS", "SS R-Square",
-        "Vth", "Vth R-Square", "gm", "gm Vg", "Mobility", "Ion", "Ioff",
+        "Vthgm", "Vthgm R-Square", "gm", "gm Vg", "Mobility", "Ion", "Ioff",
         "Ion/Ioff", "L", "W", "Cox", "Cox Mode", "Oxide Thickness",
         "Kappa", "Vd", "Ioff Vg", "Ion Vg", "Hyst Level logA",
         "Hyst Forward Vg", "Hyst Backward Vg", "Hyst Delta Vg",
         "Hyst Delta Vg (linear)",
         "SS Slope", "SS Intercept", "Vth Slope", "Vth Intercept",
-        "Gate Leakage", "Curve"
+        "Gate Leakage", "Curve", "Vthcc", "Vthcc Current Density"
     };
     vector<string> units = {
         "", "", "", "", "mV/dec", "", "V", "", "S", "V",
         "cm^2/(V s)", "A", "A", "", "um", "um", "F/cm^2", "",
         "nm", "", "V", "V", "V", "", "V", "V", "V", "V",
-        "dec/V", "", "A/V", "A", "", ""
+        "dec/V", "", "A/V", "A", "", "", "V", "uA/um"
     };
     for (int ii = 0; ii < names.GetSize(); ii++)
     {
@@ -3829,7 +3924,7 @@ static bool _fet_write_summary_row(GraphLayer& gl, const FETOptions& options,
     if (!wks || row < 0)
         return false;
     if (wks.GetNumRows() <= row)
-        wks.SetSize(row + 1, max(wks.GetNumCols(), 34));
+        wks.SetSize(row + 1, max(wks.GetNumCols(), 36));
 
     wks.SetCell(row, 0, gl.GetPage().GetName());
     wks.SetCell(row, 1, result.source_range);
@@ -3865,6 +3960,8 @@ static bool _fet_write_summary_row(GraphLayer& gl, const FETOptions& options,
     wks.SetCell(row, 31, result.vth_intercept_A);
     wks.SetCell(row, 32, result.gate_warning);
     wks.SetCell(row, 33, curveLabel);
+    wks.SetCell(row, 34, result.vth_cc_V);
+    wks.SetCell(row, 35, result.vth_cc_current_density_uA_um);
     wks.AutoSize();
     return true;
 }
@@ -3890,6 +3987,8 @@ static int _fet_analyze(const XYRange& input, const XYRange& ssRange,
     result.hysteresis_backward_Vg = NANUM;
     result.hysteresis_delta_Vg = NANUM;
     result.hysteresis_delta_Vg_linear = NANUM;
+    result.vth_cc_V = NANUM;
+    result.vth_cc_current_density_uA_um = NANUM;
     double effectiveCox = _fet_effective_cox(options);
     if (options.L_um <= 0 || options.W_um <= 0
         || !_fet_valid_number(effectiveCox) || effectiveCox <= 0
@@ -3899,6 +3998,7 @@ static int _fet_analyze(const XYRange& input, const XYRange& ssRange,
         return 20;
     if (!_fet_extract_vth(vthRange, result))
         return 30;
+    _fet_extract_vth_cc(input, options, result);
     if (!_fet_extract_curve_metrics(input, options, result))
         return 40;
 
@@ -3936,6 +4036,11 @@ int fet_analyze_xf_core(const XYRange& input, const XYRange& ssRange,
     resultTree.SS.dVal = result.ss_mV_dec;
     resultTree.SS_RSquare.dVal = result.ss_r2;
     resultTree.Vth.dVal = result.vth_V;
+    resultTree.Vthgm.dVal = result.vth_V;
+    resultTree.Vthgm_RSquare.dVal = result.vth_r2;
+    resultTree.Vthcc.dVal = result.vth_cc_V;
+    resultTree.Vthcc_CurrentDensity_uA_um.dVal =
+        result.vth_cc_current_density_uA_um;
     resultTree.Vth_RSquare.dVal = result.vth_r2;
     resultTree.gm.dVal = result.gm_S;
     resultTree.gm_Vg.dVal = result.gm_Vg_V;
@@ -4088,14 +4193,15 @@ static void _fet_stats_param_meta(int paramIndex, string& name, string& unit,
                                   string& axisTitle)
 {
     vector<string> names = {
-        "SS", "Vth", "gm", "Mobility", "Ion", "log10(Ion/Ioff)"
+        "SS", "Vthgm", "Vthcc", "gm", "Mobility", "Ion", "log10(Ion/Ioff)"
     };
     vector<string> units = {
-        "mV/dec", "V", "uS", "cm^2/(V s)", "uA/um", ""
+        "mV/dec", "V", "V", "uS", "cm^2/(V s)", "uA/um", ""
     };
     vector<string> titles = {
         "SS (mV/dec)",
-        "\\i(V)\\-(th) (V)",
+        "\\i(V)\\-(thgm) (V)",
+        "\\i(V)\\-(thcc) (V)",
         "\\i(g)\\-(m) (\\g(m)S)",
         "\\g(m)\\-(FE) (cm\\+(2)/(V\\x(00B7)s))",
         "\\i(I)\\-(on) (\\g(m)A/\\g(m)m)",
@@ -4109,14 +4215,14 @@ static void _fet_stats_param_meta(int paramIndex, string& name, string& unit,
     axisTitle = titles[idx];
 }
 
-// Maps a 0-7 selection index (used by the scatter and correlation-matrix
+// Maps a 0-8 selection index (used by the scatter and correlation-matrix
 // dialogs) to its column in [FETStatsData]Parameters and a display name.
 // Columns 0/1 (Curve/Segment) are text, not selectable here.
 static void _fet_batch_param_col_name(int paramIndex, int& col, string& name)
 {
-    vector<int> cols = { 2, 4, 6, 7, 8, 9, 10, 11 };
+    vector<int> cols = { 2, 4, 5, 7, 8, 9, 10, 11, 12 };
     vector<string> names = {
-        "SS", "Vth", "gm", "Mobility", "Ion", "Ioff", "Ion/Ioff", "log10(Ion/Ioff)"
+        "SS", "Vthgm", "Vthcc", "gm", "Mobility", "Ion", "Ioff", "Ion/Ioff", "log10(Ion/Ioff)"
     };
     int idx = paramIndex % cols.GetSize();
     if (idx < 0)
@@ -4624,12 +4730,15 @@ static bool _fet_build_multi_graph_data(Worksheet& srcCurves, int colsPerCurve,
         outDerived.Columns(dstBase + 1).SetLongName("Id");
         outDerived.Columns(dstBase + 1).SetUnits("A");
         outDerived.Columns(dstBase + 1).SetType(OKDATAOBJ_DESIGNATION_Y);
+        outDerived.Columns(dstBase + 1).SetComments(label);
         outDerived.Columns(dstBase + 2).SetLongName("absId");
         outDerived.Columns(dstBase + 2).SetUnits("A");
         outDerived.Columns(dstBase + 2).SetType(OKDATAOBJ_DESIGNATION_Y);
+        outDerived.Columns(dstBase + 2).SetComments(label);
         outDerived.Columns(dstBase + 3).SetLongName("logAbsId");
         outDerived.Columns(dstBase + 3).SetUnits("log10(A)");
         outDerived.Columns(dstBase + 3).SetType(OKDATAOBJ_DESIGNATION_Y);
+        outDerived.Columns(dstBase + 3).SetComments(label);
 
         int rr;
         for (rr = 0; rr < rowsTotal; rr++)
@@ -4654,6 +4763,118 @@ static bool _fet_build_multi_graph_data(Worksheet& srcCurves, int colsPerCurve,
     }
     outDerived.AutoSize();
     return true;
+}
+
+static bool _fet_row_has_any_mask(Worksheet& wks, int row)
+{
+    if (!wks || row < 0)
+        return false;
+    int cols = wks.GetNumCols();
+    int cc;
+    for (cc = 0; cc < cols; cc++)
+    {
+        DatasetObject ds(wks.Columns(cc));
+        if (!ds)
+            continue;
+        vector<byte> mask;
+        ds.GetMask(mask);
+        if (row < mask.GetSize() && mask[row])
+            return true;
+    }
+    return false;
+}
+
+static int _fet_find_curve_mask_state(const vector<string>& names,
+                                      const vector<int>& states,
+                                      LPCSTR label)
+{
+    if (!label || !label[0])
+        return -1;
+    int ii;
+    for (ii = 0; ii < names.GetSize(); ii++)
+    {
+        if (names[ii].CompareNoCase(label) == 0)
+            return states[ii];
+    }
+    return -1;
+}
+
+// Synchronizes user masking from [FETStatsData]Parameters to the matching
+// 4-column curve blocks in [FETStatsData]OverlayCurves. Matching is by curve
+// name/comment, not row position, so users may sort the Parameters sheet
+// before masking rows. If any cell in a Parameters row is masked, the whole
+// corresponding overlay curve is masked; unmasking the row clears it again.
+static int _fet_sync_overlay_masks_from_parameters(bool refreshGraphs = true)
+{
+    WorksheetPage statsBook(FET_STATS_DATA_PAGE);
+    if (!statsBook)
+        return -1;
+    Worksheet paramsWks = statsBook.Layers("Parameters");
+    Worksheet overlayWks = statsBook.Layers("OverlayCurves");
+    if (!paramsWks || !overlayWks)
+        return -2;
+
+    StringArray curveNames;
+    paramsWks.Columns(0).GetStringArray(curveNames);
+    vector<string> names;
+    vector<int> states;
+    int rowCount = min(curveNames.GetSize(), paramsWks.GetNumRows());
+    int rr;
+    for (rr = 0; rr < rowCount; rr++)
+    {
+        string name = curveNames[rr];
+        if (name.IsEmpty())
+            continue;
+        bool masked = _fet_row_has_any_mask(paramsWks, rr);
+        int found = -1;
+        int ii;
+        for (ii = 0; ii < names.GetSize(); ii++)
+        {
+            if (names[ii].CompareNoCase(name) == 0)
+            {
+                found = ii;
+                break;
+            }
+        }
+        if (found >= 0)
+            states[found] = states[found] || masked;
+        else
+        {
+            names.Add(name);
+            states.Add(masked ? 1 : 0);
+        }
+    }
+
+    int overlayRows = overlayWks.GetNumRows();
+    int curveCount = overlayWks.GetNumCols() / 4;
+    int synced = 0;
+    int cc;
+    for (cc = 0; cc < curveCount; cc++)
+    {
+        int baseCol = cc * 4;
+        string label = overlayWks.Columns(baseCol).GetComments();
+        int maskState = _fet_find_curve_mask_state(names, states, label);
+        bool masked = maskState > 0;
+        vector<byte> mask(overlayRows);
+        mask = masked ? 1 : 0;
+        int offset;
+        for (offset = 0; offset < 4; offset++)
+        {
+            DatasetObject ds(overlayWks.Columns(baseCol + offset));
+            if (ds)
+                ds.SetMask(mask, true, false);
+        }
+        if (maskState >= 0)
+            synced++;
+    }
+
+    if (refreshGraphs)
+    {
+        GraphPage overlayGraph(FET_MULTI_OVERLAY_GRAPH_PAGE);
+        if (overlayGraph)
+            overlayGraph.Refresh();
+    }
+    return synced;
 }
 
 // Multi-curve overlay graph: every curve on the log (left) axis uses the
@@ -4716,6 +4937,7 @@ static bool _fet_build_multi_overlay_graph(Worksheet& derived, int curveCount,
     _fet_configure_linear_transfer_graph(rightLayer);
     _fet_set_y_axis_color(leftLayer, false, options.logCurveColor);
     _fet_set_y_axis_color(rightLayer, true, options.linearCurveColor);
+    _fet_add_sync_mask_button(leftLayer);
     _fet_add_multi_button(leftLayer);
     _fet_tag_source_book(leftLayer, sourceBookName);
     gp.SetShow(PAGE_ACTIVATE);
@@ -4754,15 +4976,16 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
                          ? 1.0e6 / options.device.W_um : 1.0e6;
 
     Worksheet paramWks = _fet_named_page_sheet(FET_STATS_DATA_PAGE,
-                                               "Parameters", 12, true);
+                                               "Parameters", 13, true);
     if (!paramWks)
         return 1;
     vector<string> paramColNames = {
-        "Curve", "Segment", "SS", "SS R-Square", "Vth", "Vth R-Square",
-        "gm", "Mobility", "Ion", "Ioff", "Ion/Ioff", "log10(Ion/Ioff)"
+        "Curve", "Segment", "SS", "SS R-Square", "Vthgm", "Vthcc",
+        "Vthgm R-Square", "gm", "Mobility", "Ion", "Ioff", "Ion/Ioff",
+        "log10(Ion/Ioff)"
     };
     vector<string> paramColUnits = {
-        "", "", "mV/dec", "", "V", "", "uS", "cm^2/(V s)",
+        "", "", "mV/dec", "", "V", "V", "", "uS", "cm^2/(V s)",
         "uA/um", "uA/um", "", ""
     };
     int cc;
@@ -4791,7 +5014,7 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
     _fet_set_graph_page_ratio(progressLayer, 500, 3000);
     statsGraph.SetShow(PAGE_ACTIVATE);
 
-    vector ssVals, vthVals, gmVals, mobVals, ionVals, ratioVals;
+    vector ssVals, vthGmVals, vthCcVals, gmVals, mobVals, ionVals, ratioVals;
     vector<string> failedCurves;
     int analyzed = 0;
     int bestCurveIndex = -1;
@@ -4871,7 +5094,7 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
 
         int row = analyzed;
         if (paramWks.GetNumRows() <= row)
-            paramWks.SetSize(row + 1, max(paramWks.GetNumCols(), 12));
+            paramWks.SetSize(row + 1, max(paramWks.GetNumCols(), 13));
         double gm_uS = result.gm_S * 1.0e6;
         double ionDensity = result.ion_A * densityFactor;
         double ioffDensity = result.ioff_A * densityFactor;
@@ -4881,16 +5104,19 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
         paramWks.SetCell(row, 2, result.ss_mV_dec);
         paramWks.SetCell(row, 3, result.ss_r2);
         paramWks.SetCell(row, 4, result.vth_V);
-        paramWks.SetCell(row, 5, result.vth_r2);
-        paramWks.SetCell(row, 6, gm_uS);
-        paramWks.SetCell(row, 7, result.mobility_cm2_Vs);
-        paramWks.SetCell(row, 8, ionDensity);
-        paramWks.SetCell(row, 9, ioffDensity);
-        paramWks.SetCell(row, 10, result.ion_ioff);
-        paramWks.SetCell(row, 11, ratioLog);
+        paramWks.SetCell(row, 5, result.vth_cc_V);
+        paramWks.SetCell(row, 6, result.vth_r2);
+        paramWks.SetCell(row, 7, gm_uS);
+        paramWks.SetCell(row, 8, result.mobility_cm2_Vs);
+        paramWks.SetCell(row, 9, ionDensity);
+        paramWks.SetCell(row, 10, ioffDensity);
+        paramWks.SetCell(row, 11, result.ion_ioff);
+        paramWks.SetCell(row, 12, ratioLog);
 
         ssVals.Add(result.ss_mV_dec);
-        vthVals.Add(result.vth_V);
+        vthGmVals.Add(result.vth_V);
+        if (_fet_valid_number(result.vth_cc_V))
+            vthCcVals.Add(result.vth_cc_V);
         gmVals.Add(gm_uS);
         mobVals.Add(result.mobility_cm2_Vs);
         ionVals.Add(ionDensity);
@@ -4915,7 +5141,7 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
     {
         paramWks.SetCell(staleRow, 0, "");
         paramWks.SetCell(staleRow, 1, "");
-        for (staleCol = 2; staleCol < 12; staleCol++)
+        for (staleCol = 2; staleCol < 13; staleCol++)
             paramWks.SetCell(staleRow, staleCol, NANUM);
     }
     paramWks.AutoSize();
@@ -4959,10 +5185,11 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
     {
         vector vals;
         if (pp == 0) vals = ssVals;
-        else if (pp == 1) vals = vthVals;
-        else if (pp == 2) vals = gmVals;
-        else if (pp == 3) vals = mobVals;
-        else if (pp == 4) vals = ionVals;
+        else if (pp == 1) vals = vthGmVals;
+        else if (pp == 2) vals = vthCcVals;
+        else if (pp == 3) vals = gmVals;
+        else if (pp == 4) vals = mobVals;
+        else if (pp == 5) vals = ionVals;
         else vals = ratioVals;
 
         string paramName, paramUnit, axisTitle;
@@ -4981,6 +5208,7 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
         g_fet_stats_current_param = 0;
     GraphLayer statsLayer = statsGraph.Layers(0);
     _fet_render_stats_param(statsLayer, g_fet_stats_current_param);
+    _fet_add_sync_mask_button(statsLayer);
     _fet_add_multi_button(statsLayer);
     _fet_tag_source_book(statsLayer, bookName);
     set_active_layer(statsLayer);
@@ -5045,11 +5273,12 @@ static bool _fet_get_multi_options(LPCSTR title = "FET Multi-Curve Analysis")
         GETN_NUM(SmoothingWindow, "Smoothing window (odd points)", options.smoothingWindow)
         GETN_NUM(SSWindowPoints, "Automatic SS window (0 = auto)", options.ssWindowPoints)
         GETN_NUM(VthWindowPoints, "Automatic Vth window (0 = auto)", options.vthWindowPoints)
+        GETN_NUM(VthCcCurrent, "Vthcc current (uA/um)", options.vthCcCurrentDensity_uA_um)
         GETN_NUM(MinFitR2, "Minimum automatic fit R-Square", options.minFitR2)
     GETN_END_BRANCH(extract)
     GETN_BEGIN_BRANCH(stats, "Statistics")
         GETN_NUM(Bins, "Histogram bins (0 = auto)", g_fet_hist_bins)
-        GETN_LIST(ShowParam, "Show parameter", g_fet_stats_current_param, "SS|Vth|gm|Mobility|Ion|log10(Ion/Ioff)")
+        GETN_LIST(ShowParam, "Show parameter", g_fet_stats_current_param, "SS|Vthgm|Vthcc|gm|Mobility|Ion|log10(Ion/Ioff)")
     GETN_END_BRANCH(stats)
 
     _fet_sync_cox_input_enables(settings.device);
@@ -5067,6 +5296,7 @@ static bool _fet_get_multi_options(LPCSTR title = "FET Multi-Curve Analysis")
     options.smoothingWindow = (int)settings.extract.SmoothingWindow.dVal;
     options.ssWindowPoints = (int)settings.extract.SSWindowPoints.dVal;
     options.vthWindowPoints = (int)settings.extract.VthWindowPoints.dVal;
+    options.vthCcCurrentDensity_uA_um = settings.extract.VthCcCurrent.dVal;
     options.minFitR2 = settings.extract.MinFitR2.dVal;
     if (options.smoothingWindow < 1)
         options.smoothingWindow = 1;
@@ -5076,6 +5306,8 @@ static bool _fet_get_multi_options(LPCSTR title = "FET Multi-Curve Analysis")
         options.ssWindowPoints = 0;
     if (options.vthWindowPoints < 0)
         options.vthWindowPoints = 0;
+    if (options.vthCcCurrentDensity_uA_um <= 0)
+        options.vthCcCurrentDensity_uA_um = 1.0e-5;
     if (options.minFitR2 < 0)
         options.minFitR2 = 0;
     if (options.minFitR2 > 1)
@@ -5114,6 +5346,7 @@ static bool _fet_multi_fit_inputs_changed(const FETDialogOptions& before,
         || before.smoothingWindow != after.smoothingWindow
         || before.ssWindowPoints != after.ssWindowPoints
         || before.vthWindowPoints != after.vthWindowPoints
+        || before.vthCcCurrentDensity_uA_um != after.vthCcCurrentDensity_uA_um
         || before.minFitR2 != after.minFitR2
         || directionBefore != directionAfter;
 }
@@ -5165,10 +5398,11 @@ static bool _fet_multi_rebin_from_parameters()
     if (!paramsWks || !statsWks || !histWks)
         return false;
 
-    // pp (0..FET_STATS_PARAM_COUNT-1, the stats/histogram ordering: SS, Vth,
-    // gm, Mobility, Ion, log10(Ion/Ioff)) mapped onto _fet_batch_param_col_name's
-    // wider 0..7 selection (which also has Ioff and Ion/Ioff in between).
-    vector<int> batchIndexForParam = { 0, 1, 2, 3, 4, 7 };
+    // pp (0..FET_STATS_PARAM_COUNT-1, the stats/histogram ordering: SS,
+    // Vthgm, Vthcc, gm, Mobility, Ion, log10(Ion/Ioff)) mapped onto
+    // _fet_batch_param_col_name's wider 0..8 selection (which also has Ioff
+    // and Ion/Ioff in between).
+    vector<int> batchIndexForParam = { 0, 1, 2, 3, 4, 5, 8 };
     int pp;
     for (pp = 0; pp < FET_STATS_PARAM_COUNT; pp++)
     {
@@ -5195,14 +5429,14 @@ static bool _fet_multi_rebin_from_parameters()
 // curves, since they're cross-parameter analyses over results that already
 // exist.
 
-static int g_fet_scatter_x_param = 4;  // Ion
+static int g_fet_scatter_x_param = 5;  // Ion
 static int g_fet_scatter_y_param = 0;  // SS
 
 static bool _fet_get_scatter_options()
 {
     GETN_BOX(settings)
-    GETN_LIST(XParam, "X-axis parameter", g_fet_scatter_x_param, "SS|Vth|gm|Mobility|Ion|Ioff|Ion/Ioff|log10(Ion/Ioff)")
-    GETN_LIST(YParam, "Y-axis parameter", g_fet_scatter_y_param, "SS|Vth|gm|Mobility|Ion|Ioff|Ion/Ioff|log10(Ion/Ioff)")
+    GETN_LIST(XParam, "X-axis parameter", g_fet_scatter_x_param, "SS|Vthgm|Vthcc|gm|Mobility|Ion|Ioff|Ion/Ioff|log10(Ion/Ioff)")
+    GETN_LIST(YParam, "Y-axis parameter", g_fet_scatter_y_param, "SS|Vthgm|Vthcc|gm|Mobility|Ion|Ioff|Ion/Ioff|log10(Ion/Ioff)")
     if (!GetNBox(settings, "FET Scatter + Histograms"))
         return false;
     g_fet_scatter_x_param = settings.XParam.nVal;
@@ -5228,7 +5462,7 @@ static bool _fet_string_list_contains(const vector<string>& names, LPCSTR s)
 // Snapshots the names of all current GraphPages, for use with
 // _fet_pick_new_graph_page below. Needed because neither LT_execute()'s own
 // return value NOR Project.ActiveLayer() reliably indicates whether an
-// X-Function (plot_marginal/plotmatrix) actually built the graph we asked
+// X-Function (currently plotmatrix for the correlation graph) actually built the graph we asked
 // for: headless testing this session showed LT_execute() can return FALSE
 // even when a correct multi-layer graph was built, AND return TRUE while
 // only producing junk single-layer pages -- so the only trustworthy check
@@ -5289,9 +5523,9 @@ static bool _fet_pick_new_graph_page(const vector<string>& before, int minLayers
 // "Graph3") to a fixed, predictable page name, destroying any stale page
 // already occupying that name first -- so downstream code (the [FET Multi]
 // re-run button's source-book tag lookup, re-running the same
-// scatter/correlation operation twice, and tests) can find "the" scatter or
-// correlation graph by a fixed name regardless of whether the native
-// template or the hand-built fallback produced it.
+// correlation operation twice, and tests) can find "the" correlation graph
+// by a fixed name regardless of whether the native template or the
+// hand-built fallback produced it.
 static void _fet_rename_graph_page_to(string& graphName, LPCSTR fixedName)
 {
     if (graphName.CompareNoCase(fixedName) == 0)
@@ -5306,36 +5540,104 @@ static void _fet_rename_graph_page_to(string& graphName, LPCSTR fixedName)
     graphName = target.GetName();
 }
 
-// Tries Origin's built-in "Marginal Histograms" graph -- the plot_marginal
-// X-Function, the same template reachable from Origin's own graph gallery --
-// before falling back to a hand-built 3-layer graph. Confirmed via headless
-// probing this session that plot_marginal CAN build a correct 3-layer
-// marginal-histogram graph even while LT_execute() itself reports failure,
-// so success/failure here is judged purely by what page shows up afterward
-// (a real marginal-histogram graph needs a main layer plus 2 margins = 3
-// layers), not by LT_execute()'s return value.
-// srcWks must be a plain 2-column (X, Y) worksheet.
-static bool _fet_try_native_marginal_plot(Worksheet& srcWks, string& graphName)
+static void _fet_safe_sheet_token(LPCSTR name, string& out)
 {
-    graphName = "";
-    if (!srcWks)
-        return false;
-    string bookName = srcWks.GetPage().GetName();
-    string wksName = srcWks.GetName();
-    vector<string> before;
-    _fet_snapshot_graph_page_names(before);
-    string script;
-    script.Format("plot_marginal iy:=[%s]%s!(1,2) type:=0 top:=0 right:=0;",
-                  bookName, wksName);
-    LT_execute(script);
-    return _fet_pick_new_graph_page(before, 3, graphName);
+    out = name && name[0] ? name : "Param";
+    out.Replace("log10(Ion/Ioff)", "log10IonIoff");
+    out.Replace("Ion/Ioff", "IonIoff");
+    out.Replace("/", "");
+    out.Replace("(", "");
+    out.Replace(")", "");
+    out.Replace(" ", "");
+    if (out.IsEmpty())
+        out = "Param";
 }
 
-// Hand-built 3-layer fallback: a main scatter (bottom-left) plus one
+static void _fet_scatter_sheet_name(LPCSTR nameX, LPCSTR nameY, string& sheetName)
+{
+    string safeX, safeY;
+    _fet_safe_sheet_token(nameX, safeX);
+    _fet_safe_sheet_token(nameY, safeY);
+    sheetName = safeX + "-" + safeY;
+    if (sheetName.GetLength() > 28)
+        sheetName = safeX.Left(12) + "-" + safeY.Left(12);
+}
+
+static bool _fet_build_scatter_source_sheet(Worksheet& paramsWks,
+                                            int colX, int colY,
+                                            LPCSTR nameX, LPCSTR nameY,
+                                            Worksheet& outWks,
+                                            vector& outX, vector& outY)
+{
+    outX.SetSize(0);
+    outY.SetSize(0);
+    if (!paramsWks)
+        return false;
+
+    string sheetName;
+    _fet_scatter_sheet_name(nameX, nameY, sheetName);
+    outWks = _fet_named_page_sheet(FET_STATS_DATA_PAGE, sheetName, 3, true);
+    if (!outWks)
+        return false;
+
+    StringArray curveNames;
+    paramsWks.Columns(0).GetStringArray(curveNames);
+    int paramRows = paramsWks.GetNumRows();
+    vector<string> keptNames;
+    vector<byte> keptMask;
+    int rr;
+    for (rr = 0; rr < paramRows; rr++)
+    {
+        string curveName = rr < curveNames.GetSize() ? curveNames[rr] : "";
+        if (curveName.IsEmpty())
+            continue;
+        double xv = paramsWks.Cell(rr, colX);
+        double yv = paramsWks.Cell(rr, colY);
+        if (is_missing_value(xv) || is_missing_value(yv))
+            continue;
+        keptNames.Add(curveName);
+        outX.Add(xv);
+        outY.Add(yv);
+        keptMask.Add(_fet_row_has_any_mask(paramsWks, rr) ? 1 : 0);
+    }
+    int rows = outX.GetSize();
+    if (rows < 1)
+        return false;
+
+    outWks.SetSize(rows, 3);
+    outWks.Columns(0).SetLongName("Name");
+    outWks.Columns(0).SetType(OKDATAOBJ_DESIGNATION_L);
+    outWks.Columns(1).SetLongName(nameX);
+    outWks.Columns(1).SetType(OKDATAOBJ_DESIGNATION_X);
+    outWks.Columns(2).SetLongName(nameY);
+    outWks.Columns(2).SetType(OKDATAOBJ_DESIGNATION_Y);
+    outWks.Columns(0).SetComments("[FETStatsData]Parameters Curve");
+    outWks.Columns(1).SetComments("[FETStatsData]Parameters");
+    outWks.Columns(2).SetComments("[FETStatsData]Parameters");
+
+    for (rr = 0; rr < rows; rr++)
+    {
+        outWks.SetCell(rr, 0, keptNames[rr]);
+        outWks.SetCell(rr, 1, outX[rr]);
+        outWks.SetCell(rr, 2, outY[rr]);
+    }
+    int cc;
+    for (cc = 0; cc < 3; cc++)
+    {
+        DatasetObject ds(outWks.Columns(cc));
+        if (ds)
+            ds.SetMask(keptMask, true, false);
+    }
+    outWks.AutoSize();
+    return true;
+}
+
+// Hand-built 3-layer scatter graph: a main scatter (bottom-left) plus one
 // marginal histogram along each axis (top for X, right for Y), both aligned
 // to the main layer's own autoscaled range so the three visually line up.
 // Bars use the already-proven IDM_PLOT_COLUMN/IDM_PLOT_BAR types.
 static bool _fet_build_scatter_hist_graph_fallback(Worksheet& derived,
+                                                    Worksheet& histWks,
                                                     const vector& vx,
                                                     const vector& vy,
                                                     LPCSTR nameX, LPCSTR nameY,
@@ -5352,26 +5654,27 @@ static bool _fet_build_scatter_hist_graph_fallback(Worksheet& derived,
     _fet_stats_histogram(vy, 0, meanY, sdY, centersY, countsY, curveXY, curveYY);
 
     int histRows = max(centersX.GetSize(), centersY.GetSize());
-    if (derived.GetNumCols() < 6 || derived.GetNumRows() < histRows)
-        derived.SetSize(max(rows, histRows), 6);
-    derived.Columns(2).SetLongName("X Bin Center");
-    derived.Columns(2).SetType(OKDATAOBJ_DESIGNATION_X);
-    derived.Columns(3).SetLongName("X Bin Count");
-    derived.Columns(3).SetType(OKDATAOBJ_DESIGNATION_Y);
-    derived.Columns(4).SetLongName("Y Bin Count");
-    derived.Columns(4).SetType(OKDATAOBJ_DESIGNATION_X);
-    derived.Columns(5).SetLongName("Y Bin Center");
-    derived.Columns(5).SetType(OKDATAOBJ_DESIGNATION_Y);
+    if (!histWks)
+        return false;
+    histWks.SetSize(histRows, 4);
+    histWks.Columns(0).SetLongName("X Bin Center");
+    histWks.Columns(0).SetType(OKDATAOBJ_DESIGNATION_X);
+    histWks.Columns(1).SetLongName("X Bin Count");
+    histWks.Columns(1).SetType(OKDATAOBJ_DESIGNATION_Y);
+    histWks.Columns(2).SetLongName("Y Bin Count");
+    histWks.Columns(2).SetType(OKDATAOBJ_DESIGNATION_X);
+    histWks.Columns(3).SetLongName("Y Bin Center");
+    histWks.Columns(3).SetType(OKDATAOBJ_DESIGNATION_Y);
 
     int ii;
-    for (ii = 0; ii < derived.GetNumRows(); ii++)
+    for (ii = 0; ii < histWks.GetNumRows(); ii++)
     {
-        derived.SetCell(ii, 2, ii < centersX.GetSize() ? centersX[ii] : NANUM);
-        derived.SetCell(ii, 3, ii < countsX.GetSize() ? countsX[ii] : NANUM);
-        derived.SetCell(ii, 4, ii < countsY.GetSize() ? countsY[ii] : NANUM);
-        derived.SetCell(ii, 5, ii < centersY.GetSize() ? centersY[ii] : NANUM);
+        histWks.SetCell(ii, 0, ii < centersX.GetSize() ? centersX[ii] : NANUM);
+        histWks.SetCell(ii, 1, ii < countsX.GetSize() ? countsX[ii] : NANUM);
+        histWks.SetCell(ii, 2, ii < countsY.GetSize() ? countsY[ii] : NANUM);
+        histWks.SetCell(ii, 3, ii < centersY.GetSize() ? centersY[ii] : NANUM);
     }
-    derived.AutoSize();
+    histWks.AutoSize();
 
     FETDialogOptions options;
     _fet_get_effective_dialog_options(options);
@@ -5395,8 +5698,8 @@ static bool _fet_build_scatter_hist_graph_fallback(Worksheet& derived,
     mainLayer.LT_execute("layer.unit=0;layer.left=16;layer.top=15;layer.width=60;layer.height=60;");
 
     DataRange scatterRange;
-    scatterRange.Add(derived, 0, "X", 0, 0, rows - 1);
-    scatterRange.Add(derived, 1, "Y", 1, 0, rows - 1);
+    scatterRange.Add(derived, 1, "X", 1, 0, rows - 1);
+    scatterRange.Add(derived, 2, "Y", 2, 0, rows - 1);
     int scatterIndex = mainLayer.AddPlot(scatterRange, IDM_PLOT_SCATTER);
     DataPlot scatterPlot = mainLayer.DataPlots(scatterIndex);
     _fet_style_plot(scatterPlot, options.logCurveColor, true);
@@ -5422,8 +5725,8 @@ static bool _fet_build_scatter_hist_graph_fallback(Worksheet& derived,
         set_active_layer(topLayer);
         topLayer.LT_execute("layer.unit=0;layer.left=16;layer.top=78;layer.width=60;layer.height=16;");
         DataRange topRange;
-        topRange.Add(derived, 2, "X", 2, 0, centersX.GetSize() - 1);
-        topRange.Add(derived, 3, "Y", 3, 0, centersX.GetSize() - 1);
+        topRange.Add(histWks, 0, "X", 0, 0, centersX.GetSize() - 1);
+        topRange.Add(histWks, 1, "Y", 1, 0, centersX.GetSize() - 1);
         int topIndex = topLayer.AddPlot(topRange, IDM_PLOT_COLUMN);
         DataPlot topPlot = topLayer.DataPlots(topIndex);
         _fet_style_column_plot(topPlot, markerRed, markerGreen, markerBlue);
@@ -5443,8 +5746,8 @@ static bool _fet_build_scatter_hist_graph_fallback(Worksheet& derived,
         set_active_layer(rightLayer);
         rightLayer.LT_execute("layer.unit=0;layer.left=78;layer.top=15;layer.width=16;layer.height=60;");
         DataRange rightRange;
-        rightRange.Add(derived, 4, "X", 4, 0, centersY.GetSize() - 1);
-        rightRange.Add(derived, 5, "Y", 5, 0, centersY.GetSize() - 1);
+        rightRange.Add(histWks, 2, "X", 2, 0, centersY.GetSize() - 1);
+        rightRange.Add(histWks, 3, "Y", 3, 0, centersY.GetSize() - 1);
         int rightIndex = rightLayer.AddPlot(rightRange, IDM_PLOT_BAR);
         DataPlot rightPlot = rightLayer.DataPlots(rightIndex);
         _fet_style_column_plot(rightPlot, markerRed, markerGreen, markerBlue);
@@ -5484,50 +5787,34 @@ static bool _fet_build_scatter_hist_graph(int xParamIdx, int yParamIdx,
     _fet_batch_param_col_name(xParamIdx, colX, nameX);
     _fet_batch_param_col_name(yParamIdx, colY, nameY);
 
+    Worksheet derived;
     vector vx, vy;
-    if (!_fet_read_batch_param_pair(paramsWks, colX, colY, vx, vy) || vx.GetSize() < 2)
+    if (!_fet_build_scatter_source_sheet(paramsWks, colX, colY,
+                                         nameX, nameY, derived, vx, vy)
+        || vx.GetSize() < 2)
         return false;
     int rows = vx.GetSize();
 
-    Worksheet derived = _fet_named_page_sheet(FET_SCATTER_DATA_PAGE, "Data", 6, true);
-    if (!derived)
-        return false;
-    derived.SetSize(rows, 6);
-    derived.Columns(0).SetLongName(nameX);
-    derived.Columns(0).SetType(OKDATAOBJ_DESIGNATION_X);
-    derived.Columns(1).SetLongName(nameY);
-    derived.Columns(1).SetType(OKDATAOBJ_DESIGNATION_Y);
-    int ii;
-    for (ii = 0; ii < rows; ii++)
-    {
-        derived.SetCell(ii, 0, vx[ii]);
-        derived.SetCell(ii, 1, vy[ii]);
-    }
-    derived.AutoSize();
-
-    string graphName;
-    if (_fet_try_native_marginal_plot(derived, graphName))
-    {
-        _fet_rename_graph_page_to(graphName, FET_SCATTER_GRAPH_PAGE);
-        summaryText.Format(
-            "Scatter + marginal histograms (Origin's native Marginal "
-            "Histograms template): \"%s\" (N = %d).\n\nX: %s   Y: %s",
-            graphName, rows, nameX, nameY);
-        return true;
-    }
-
-    return _fet_build_scatter_hist_graph_fallback(derived, vx, vy, nameX, nameY,
-                                                  rows, summaryText);
+    string sheetName, histSheetName;
+    _fet_scatter_sheet_name(nameX, nameY, sheetName);
+    histSheetName = sheetName + "-Hist";
+    Worksheet histWks = _fet_named_page_sheet(FET_STATS_DATA_PAGE,
+                                              histSheetName, 4, true);
+    return _fet_build_scatter_hist_graph_fallback(derived, histWks, vx, vy,
+                                                  nameX, nameY, rows,
+                                                  summaryText);
 }
 
 static bool _fet_get_correlation_options(vector<int>& selected)
 {
-    bool checkSS = true, checkVth = true, checkGm = false, checkMob = true,
-         checkIon = true, checkIoff = false, checkRatio = false, checkLogRatio = true;
+    bool checkSS = true, checkVthgm = true, checkVthcc = true,
+         checkGm = false, checkMob = true, checkIon = true,
+         checkIoff = false, checkRatio = false, checkLogRatio = true;
 
     GETN_BOX(settings)
     GETN_CHECK(SS, "SS", checkSS)
-    GETN_CHECK(Vth, "Vth", checkVth)
+    GETN_CHECK(Vthgm, "Vthgm", checkVthgm)
+    GETN_CHECK(Vthcc, "Vthcc", checkVthcc)
     GETN_CHECK(Gm, "gm", checkGm)
     GETN_CHECK(Mobility, "Mobility", checkMob)
     GETN_CHECK(Ion, "Ion", checkIon)
@@ -5539,13 +5826,14 @@ static bool _fet_get_correlation_options(vector<int>& selected)
 
     selected.SetSize(0);
     if (settings.SS.nVal) selected.Add(0);
-    if (settings.Vth.nVal) selected.Add(1);
-    if (settings.Gm.nVal) selected.Add(2);
-    if (settings.Mobility.nVal) selected.Add(3);
-    if (settings.Ion.nVal) selected.Add(4);
-    if (settings.Ioff.nVal) selected.Add(5);
-    if (settings.Ratio.nVal) selected.Add(6);
-    if (settings.LogRatio.nVal) selected.Add(7);
+    if (settings.Vthgm.nVal) selected.Add(1);
+    if (settings.Vthcc.nVal) selected.Add(2);
+    if (settings.Gm.nVal) selected.Add(3);
+    if (settings.Mobility.nVal) selected.Add(4);
+    if (settings.Ion.nVal) selected.Add(5);
+    if (settings.Ioff.nVal) selected.Add(6);
+    if (settings.Ratio.nVal) selected.Add(7);
+    if (settings.LogRatio.nVal) selected.Add(8);
     return true;
 }
 
@@ -5559,12 +5847,12 @@ static bool _fet_get_correlation_options(vector<int>& selected)
 // back to a hand-computed coefficient table. Headless probing this session
 // showed a failed/degenerate plotmatrix call can still report LT_execute()
 // success while actually emitting several throwaway single-layer pages
-// instead of one real matrix grid, so (as with _fet_try_native_marginal_plot)
-// success is judged by the shape of whatever page(s) appear afterward, not
-// by LT_execute()'s return value: a real scatter-matrix grid for M selected
-// parameters needs well more than one layer, so require at least M layers
-// as a conservative floor. irng accepts non-contiguous column numbers
-// directly (`(2,3,5)`-style), so this reads straight from
+// instead of one real matrix grid, so success is judged by the shape of
+// whatever page(s) appear afterward, not by LT_execute()'s return value: a
+// real scatter-matrix grid for M selected parameters needs well more than
+// one layer, so require at least M layers as a conservative floor. irng
+// accepts non-contiguous column numbers directly (`(2,3,5)`-style), so this
+// reads straight from
 // [FETStatsData]Parameters, no derived worksheet needed.
 static bool _fet_try_native_scatter_matrix(Worksheet& paramsWks,
                                            const vector<int>& selected,
@@ -5900,6 +6188,7 @@ static void _fet_default_dialog_options(FETDialogOptions& options)
     options.smoothingWindow = 1;
     options.ssWindowPoints = 0;
     options.vthWindowPoints = 0;
+    options.vthCcCurrentDensity_uA_um = 1.0e-5;
     options.minFitR2 = 0.90;
     options.logCurveColor = _fet_rgb_color(79, 70, 229);
     options.linearCurveColor = _fet_rgb_color(217, 119, 6);
@@ -5926,9 +6215,10 @@ static bool _fet_get_dialog_options(FETDialogOptions& options,
         GETN_NUM(SmoothingWindow, "Smoothing window (odd points)", options.smoothingWindow)
         GETN_NUM(SSWindowPoints, "Automatic SS window (0 = auto)", options.ssWindowPoints)
         GETN_NUM(VthWindowPoints, "Automatic Vth window (0 = auto)", options.vthWindowPoints)
+        GETN_NUM(VthCcCurrent, "Vthcc current (uA/um)", options.vthCcCurrentDensity_uA_um)
         GETN_NUM(MinFitR2, "Minimum automatic fit R-Square", options.minFitR2)
         GETN_STR(SSMethod, "SS method", "log10(abs(Id)) linear fit")
-        GETN_STR(VthMethod, "Vth method", "Id linear extrapolation")
+        GETN_STR(VthMethod, "Vth methods", "Vthgm=Id linear extrapolation; Vthcc=constant current")
         GETN_STR(IonMethod, "Ion/Ioff method", "Ion=max abs(Id); Ioff=off-region mean / cursor")
     GETN_END_BRANCH(extract)
     GETN_BEGIN_BRANCH(cursors, "Range Cursors")
@@ -5977,6 +6267,7 @@ static bool _fet_get_dialog_options(FETDialogOptions& options,
     options.smoothingWindow = (int)settings.extract.SmoothingWindow.dVal;
     options.ssWindowPoints = (int)settings.extract.SSWindowPoints.dVal;
     options.vthWindowPoints = (int)settings.extract.VthWindowPoints.dVal;
+    options.vthCcCurrentDensity_uA_um = settings.extract.VthCcCurrent.dVal;
     options.minFitR2 = settings.extract.MinFitR2.dVal;
     if (options.smoothingWindow < 1)
         options.smoothingWindow = 1;
@@ -5986,6 +6277,8 @@ static bool _fet_get_dialog_options(FETDialogOptions& options,
         options.ssWindowPoints = 0;
     if (options.vthWindowPoints < 0)
         options.vthWindowPoints = 0;
+    if (options.vthCcCurrentDensity_uA_um <= 0)
+        options.vthCcCurrentDensity_uA_um = 1.0e-5;
     if (options.minFitR2 < 0)
         options.minFitR2 = 0;
     if (options.minFitR2 > 1)
@@ -6329,6 +6622,7 @@ void fet_analyzer_multi_analyze()
             _fet_multi_rebin_from_parameters();
 
         _fet_render_stats_param(statsLayer, g_fet_stats_current_param);
+        _fet_add_sync_mask_button(statsLayer);
         set_active_layer(statsLayer);
         statsLayer.GetPage().Refresh();
         return;
@@ -6349,6 +6643,19 @@ void fet_analyzer_multi_analyze()
         return;
     }
     _fet_message(summary);
+}
+
+void fet_analyzer_sync_parameter_masks()
+{
+    int synced = _fet_sync_overlay_masks_from_parameters(true);
+    if (synced < 0)
+    {
+        out_str("FET Gadget: run Multi-Curve Analysis first, then mask rows in [FETStatsData]Parameters.");
+        return;
+    }
+    string msg;
+    msg.Format("FET Gadget: synchronized Parameter masks to %d overlay curve(s).", synced);
+    out_str(msg);
 }
 
 int fet_analyzer_multi_analyze_for_test(LPCSTR lpcszBook)
@@ -6386,6 +6693,11 @@ int fet_analyzer_rerun_multi_analyze_for_test()
         return -1;
     string summary;
     return _fet_multi_analyze_core(book, summary);
+}
+
+int fet_analyzer_sync_parameter_masks_for_test()
+{
+    return _fet_sync_overlay_masks_from_parameters(true);
 }
 
 // Test hooks for the scatter+histograms and correlation-matrix builders,
@@ -6581,9 +6893,9 @@ int fet_analyzer_get_launch_mode()
 // a later version used a GETN_LIST dropdown instead of buttons, which wasn't
 // what was wanted either). GetNBox's custom-button mechanism tops out at 4
 // extra buttons beyond OK/Cancel (GETNE_ON_CUSTOM_BUTTON5 does not exist,
-// confirmed by probe) -- one short of this App's 5 operations -- so the 2
-// newer, less-common operations sit behind a "More..." button that opens a
-// second small button dialog, keeping every level real buttons.
+// confirmed by probe), so the newer, less-common operations sit behind a
+// "More..." button that opens a second small button dialog, keeping every
+// level real buttons.
 static int s_fet_start_action = 0;
 
 static int _fet_more_dialog_event(TreeNode& tr, int nRow, int nEvent,
@@ -6601,6 +6913,11 @@ static int _fet_more_dialog_event(TreeNode& tr, int nRow, int nEvent,
         s_fet_start_action = FET_LAUNCH_CORRELATION_MATRIX;
         return PEVENT_GETN_RET_TO_CLOSE;
     }
+    if (nEvent == GETNE_ON_CUSTOM_BUTTON3)
+    {
+        s_fet_start_action = FET_LAUNCH_SYNC_PARAMETER_MASKS;
+        return PEVENT_GETN_RET_TO_CLOSE;
+    }
     return 0;
 }
 
@@ -6608,7 +6925,7 @@ static int _fet_show_more_dialog()
 {
     GETN_BOX(menu)
     GETN_STR(Hint, "Choose an operation:", "") GETN_HINT
-    GETN_CUSTOM_BUTTON("OK=|Cancel=Back|Scatter + Histograms|Correlation Matrix")
+    GETN_CUSTOM_BUTTON("OK=|Cancel=Back|Scatter + Histograms|Correlation Matrix|Sync Parameter Masks")
     GetNBox(menu, _fet_more_dialog_event, FET_APP_TITLE, "");
     return s_fet_start_action;
 }
@@ -6666,4 +6983,6 @@ void fet_analyzer_start()
         fet_analyzer_scatter_hist();
     else if (mode == FET_LAUNCH_CORRELATION_MATRIX)
         fet_analyzer_correlation_matrix();
+    else if (mode == FET_LAUNCH_SYNC_PARAMETER_MASKS)
+        fet_analyzer_sync_parameter_masks();
 }
