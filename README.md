@@ -127,7 +127,8 @@ Pick one or more CSV files.
 Reads whichever worksheet or graph is **already active** — no file prompt.
 
 1. Run **Multi-Curve Analysis** (or click `[FET Multi]` on a result graph) and set device/fit
-   parameters, histogram bin count, and which parameter to open the stats graph on.
+   parameters, the analyzed segment (`Forward (+)`, `Backward (-)`, or `Both (+/-)`),
+   histogram bin count, and which parameter to open the stats graph on.
 2. Every curve is fit automatically (progress bar + Cancel support), building:
    - **Overlay graph** (`FETMultiOverlayGraph`) — log `|Id|`/linear `Id`, all curves translucent
      except the lowest-SS one, which is solid and bold.
@@ -142,8 +143,8 @@ curves.
 
 - **Scatter + Histograms** — pick X/Y parameters (SS, Vthgm, Vthcc, gm, Mobility, Ion, Ioff,
   Ion/Ioff, or log₁₀ ratio); adds a synced 3-column source sheet inside `FETStatsData`
-  (for example `SS-Mobility`: `Name`, X, Y, with row masks copied from `Parameters`) and
-  builds `FETScatterGraph`.
+  (for example `SS-Mobility`: `Name`, X, Y, all linked back to `Parameters`) and
+  builds `FETScatterGraph` with Origin's native Marginal Histograms template.
 - **Correlation Matrix** — check 2+ parameters; builds `FETCorrelationGraph` (native "Scatter
   Matrix" template, Pearson-coefficient-table fallback at `[FETStatsData]Correlation`).
 
@@ -169,8 +170,8 @@ covering each format:
 | Hidden workbook `FETGraphData` → `Extracted Parameters` | **The main results table.** One row per curve per direction — SS, Vthgm, Vthcc, gm, mobility, Ion/Ioff, hysteresis, and every fit parameter, ready to export or post-process. |
 | Multi-curve workbook (e.g. `FETMultiData1`) | `Curves`: 2 columns per curve (`Vg`/`Id` only, XYXY…) when more than one file was imported at once. No graph — run multi-curve analysis on this workbook next. |
 | Graph `FETMultiOverlayGraph` | Log `\|Id\|` (left, indigo) + linear `Id` (right, amber) — the classic single-curve palette, colored axes included, no legend. Most curves are genuinely translucent; the lowest-SS curve is solid, bold, and fully opaque. Carries the `[FET Multi]` re-run button. |
-| Workbook `FETStatsData` + graph `FETStatsGraph` | Multi-curve analysis output: `Parameters` (one row per analyzed curve), `Statistics` (N/mean/SD/median/min/max/CV per parameter), `Histogram` (bin data), `OverlayCurves` (derived data feeding the overlay graph), and a single-panel histogram graph with `[Prev]`/`[Next]` buttons to step through all seven parameters. Rebuilt on every multi-curve analysis run. |
-| Workbook `FETStatsData` → `X-Y` sheet + graph `FETScatterGraph` | Scatter of two chosen batch parameters plus marginal histograms on each axis, all aligned to the same range. The source sheet is named from the selected parameters (for example `SS-Mobility`) and has exactly three main columns: `Name`, X, Y. It is rebuilt from `Parameters` on every Scatter + Histograms run, including row masks. |
+| Workbook `FETStatsData` + graph `FETStatsGraph` | Multi-curve analysis output: `Parameters` (one row per analyzed curve segment; `Both (+/-)` suffixes `Curve` names with `[+]`/`[-]`), `Statistics` (N/mean/SD/median/min/max/CV per parameter), `Histogram` (bin data), `OverlayCurves` (derived data feeding the overlay graph), and a single-panel histogram graph with `[Prev]`/`[Next]` buttons to step through all seven parameters. Rebuilt on every multi-curve analysis run. |
+| Workbook `FETStatsData` → `X-Y` sheet + graph `FETScatterGraph` | Scatter of two chosen batch parameters plus marginal histograms on each axis using Origin's native Marginal Histograms template. The source sheet is named from the selected parameters (for example `SS-Mobility`) and has exactly three main columns: `Name`, X, Y; all three columns are linked to `Parameters`, and masks update only when you run Sync Parameter Masks. |
 | Graph `FETCorrelationGraph` (or workbook `FETStatsData` → `Correlation` as a fallback) | Native Scatter Matrix plot over the parameters you checked, or — if that can't be confirmed — a Pearson correlation coefficient table. Rebuilt on every Correlation Matrix run. |
 
 ## Features
@@ -243,17 +244,17 @@ for the full runtime data-flow notes.
 - Gate leakage (`Ig`) is imported but not yet used in analysis.
 - Graph/analysis settings are session-local; they aren't yet persisted to the graph object or
   project file.
-- Scatter + Histograms uses a hand-built 3-panel graph so its visible source data can stay in
-  `FETStatsData` as a three-column `Name`/X/Y sheet with masks synchronized from `Parameters`.
+- Scatter + Histograms uses Origin's native `plot_marginal` Marginal Histograms template first.
+  It keeps visible source data in `FETStatsData` as a three-column `Name`/X/Y sheet; all three are
+  linked back to `Parameters`, and mask synchronization is explicit via Sync Parameter Masks.
 - Correlation Matrix tries Origin's native `plotmatrix` gallery template first and falls back
   automatically to a Pearson coefficient table if a real result can't be confirmed. This fallback
   logic was verified thoroughly, but whether the native template renders correctly wasn't
   independently confirmed in a live interactive Origin session — if you only ever see a
   plain Pearson coefficient table instead of a Scatter Matrix plot, please
   [open an issue](../../issues) so the detection logic can be tuned further.
-- The marginal histogram on the right side of the Scatter + Histograms graph uses a
-  horizontal bar plot type whose exact rendered orientation hasn't been independently visually
-  confirmed (it compiles and produces a valid plot either way).
+- The hand-built Scatter + Histograms fallback still exists for Origin installs where
+  `plot_marginal` does not produce a valid 3-layer graph.
 
 ## License
 

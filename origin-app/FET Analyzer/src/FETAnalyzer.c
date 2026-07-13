@@ -9,7 +9,7 @@
 #include <xfutils.h>
 #include <sys_utils.h>
 
-#define FET_APP_TITLE "FET Gadget v0.18.0"
+#define FET_APP_TITLE "FET Gadget v0.19.0"
 #define FET_MIN_POINTS 3
 #define FET_IMPORT_COLS_PER_CURVE 6
 #define FET_IMPORT_COLS_PER_CURVE_COMPACT 2
@@ -4054,8 +4054,15 @@ int fet_analyze_xf_core(const XYRange& input, const XYRange& ssRange,
 
 // ---- Multi-file batch statistics -----------------------------------------
 
-static int g_fet_multi_direction = 0;  // 0 = forward (+), 1 = backward (-)
+static int g_fet_multi_direction = 0;  // 0 = forward (+), 1 = backward (-), 2 = both
 static int g_fet_hist_bins = 0;        // 0 = auto (sqrt rule)
+
+void fet_analyzer_set_multi_direction_for_test(int direction)
+{
+    if (direction < 0 || direction > 2)
+        direction = 0;
+    g_fet_multi_direction = direction;
+}
 
 static bool _fet_vector_stats(const vector& vals, double& mean, double& sd,
                               double& median, double& vmin, double& vmax)
@@ -4790,13 +4797,24 @@ static int _fet_find_curve_mask_state(const vector<string>& names,
 {
     if (!label || !label[0])
         return -1;
+    string forwardLabel = label;
+    forwardLabel += " [+]";
+    string backwardLabel = label;
+    backwardLabel += " [-]";
+    int found = -1;
     int ii;
     for (ii = 0; ii < names.GetSize(); ii++)
     {
-        if (names[ii].CompareNoCase(label) == 0)
-            return states[ii];
+        if (names[ii].CompareNoCase(label) == 0
+            || names[ii].CompareNoCase(forwardLabel) == 0
+            || names[ii].CompareNoCase(backwardLabel) == 0)
+        {
+            if (states[ii] > 0)
+                return 1;
+            found = 0;
+        }
     }
-    return -1;
+    return found;
 }
 
 // Synchronizes user masking from [FETStatsData]Parameters to the matching
@@ -4875,6 +4893,56 @@ static int _fet_sync_overlay_masks_from_parameters(bool refreshGraphs = true)
             overlayGraph.Refresh();
     }
     return synced;
+}
+
+static int _fet_sync_scatter_masks_from_parameters(bool refreshGraphs = true)
+{
+    WorksheetPage statsBook(FET_STATS_DATA_PAGE);
+    if (!statsBook)
+        return -1;
+    Worksheet paramsWks = statsBook.Layers("Parameters");
+    if (!paramsWks)
+        return -2;
+
+    int syncedSheets = 0;
+    int sheetIndex;
+    for (sheetIndex = 0; sheetIndex < statsBook.Layers.Count(); sheetIndex++)
+    {
+        Worksheet wks = statsBook.Layers(sheetIndex);
+        if (!wks || wks.GetName().CompareNoCase("Parameters") == 0)
+            continue;
+        if (wks.GetNumCols() < 3)
+            continue;
+        string comment = wks.Columns(0).GetComments();
+        if (comment.CompareNoCase("[FETStatsData]Parameters Curve") != 0)
+            continue;
+
+        int rows = wks.GetNumRows();
+        vector<byte> mask(rows);
+        mask = 0;
+        int rr;
+        for (rr = 0; rr < rows; rr++)
+        {
+            if (rr < paramsWks.GetNumRows() && _fet_row_has_any_mask(paramsWks, rr))
+                mask[rr] = 1;
+        }
+        int cc;
+        for (cc = 0; cc < 3; cc++)
+        {
+            DatasetObject ds(wks.Columns(cc));
+            if (ds)
+                ds.SetMask(mask, true, false);
+        }
+        syncedSheets++;
+    }
+
+    if (refreshGraphs)
+    {
+        GraphPage scatterGraph(FET_SCATTER_GRAPH_PAGE);
+        if (scatterGraph)
+            scatterGraph.Refresh();
+    }
+    return syncedSheets;
 }
 
 // Multi-curve overlay graph: every curve on the log (left) axis uses the
@@ -4971,7 +5039,10 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
 
     FETDialogOptions options;
     _fet_get_effective_dialog_options(options);
-    bool backward = g_fet_multi_direction == 1;
+    bool analyzeBoth = g_fet_multi_direction == 2;
+    bool selectedBackward = g_fet_multi_direction == 1;
+    int segmentsPerCurve = analyzeBoth ? 2 : 1;
+    int totalSegments = curveCount * segmentsPerCurve;
     double densityFactor = options.device.W_um > 0
                          ? 1.0e6 / options.device.W_um : 1.0e6;
 
@@ -5019,19 +5090,18 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
     int analyzed = 0;
     int bestCurveIndex = -1;
     double bestSS = 1e300;
+    string bestResultLabel = "";
     progressBox pb("Analyzing curves...");
-    pb.SetRange(0, curveCount);
+    pb.SetRange(0, totalSegments);
     for (cc = 0; cc < curveCount; cc++)
     {
         int baseCol = cc * colsPerCurve;
         string label = curves.Columns(baseCol).GetComments();
         if (label.IsEmpty())
             label.Format("Curve %d", cc + 1);
-        if (!pb.Set(cc))
+        int progressIndex = cc * segmentsPerCurve;
+        if (!pb.Set(progressIndex))
             break;  // user clicked Cancel -- keep whatever analyzed so far
-        _fet_update_progress_label(progressLayer, "Analyzing curves", cc + 1,
-                                   curveCount, label);
-        _fet_report_progress_status("Analyzing", cc + 1, curveCount, label);
 
         XYRange full;
         full.Add(curves, baseCol, "X", baseCol, 0, rowsTotal - 1);
@@ -5045,91 +5115,114 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
 
         int turnIndex = -1;
         bool hasBackward = _fet_detect_scan_turn(vx, turnIndex);
-        int segBegin = 0;
-        int segEnd = vx.GetSize() - 1;
-        if (backward)
+        int dd;
+        for (dd = 0; dd < segmentsPerCurve; dd++)
         {
-            if (!hasBackward)
+            bool backward = analyzeBoth ? dd == 1 : selectedBackward;
+            string resultLabel = label;
+            if (analyzeBoth)
             {
-                failedCurves.Add(label);
+                if (backward)
+                    resultLabel += " [-]";
+                else
+                    resultLabel += " [+]";
+            }
+            int segmentNumber = progressIndex + dd + 1;
+            if (!pb.Set(segmentNumber - 1))
+                break;
+            _fet_update_progress_label(progressLayer, "Analyzing curves",
+                                       segmentNumber, totalSegments,
+                                       resultLabel);
+            _fet_report_progress_status("Analyzing", segmentNumber,
+                                        totalSegments, resultLabel);
+
+            int segBegin = 0;
+            int segEnd = vx.GetSize() - 1;
+            if (backward)
+            {
+                if (!hasBackward)
+                {
+                    failedCurves.Add(resultLabel);
+                    continue;
+                }
+                segBegin = turnIndex;
+            }
+            else if (hasBackward)
+            {
+                segEnd = turnIndex;
+            }
+
+            FETRangeIndices indices;
+            if (!_fet_auto_pick_segment_indices(vx, vy, segBegin, segEnd,
+                                                backward, indices))
+            {
+                failedCurves.Add(resultLabel);
                 continue;
             }
-            segBegin = turnIndex;
-        }
-        else if (hasBackward)
-        {
-            segEnd = turnIndex;
-        }
 
-        FETRangeIndices indices;
-        if (!_fet_auto_pick_segment_indices(vx, vy, segBegin, segEnd,
-                                            backward, indices))
-        {
-            failedCurves.Add(label);
-            continue;
+            // The imported Curves sheet holds only valid Vg/Id pairs from row 0
+            // upward (trailing rows are NANUM and get cleaned), so cleaned-vector
+            // indices map 1:1 onto worksheet rows here.
+            XYRange input, ssRange, vthRange;
+            input.Add(curves, baseCol, "X", baseCol, segBegin, segEnd);
+            input.Add(curves, baseCol + 1, "Y", baseCol + 1, segBegin, segEnd);
+            ssRange.Add(curves, baseCol, "X", baseCol,
+                        indices.ssBegin, indices.ssEnd);
+            ssRange.Add(curves, baseCol + 1, "Y", baseCol + 1,
+                        indices.ssBegin, indices.ssEnd);
+            vthRange.Add(curves, baseCol, "X", baseCol,
+                         indices.vthBegin, indices.vthEnd);
+            vthRange.Add(curves, baseCol + 1, "Y", baseCol + 1,
+                         indices.vthBegin, indices.vthEnd);
+
+            FETResult result;
+            if (0 != _fet_analyze(input, ssRange, vthRange, options.device,
+                                  false, false, result))
+            {
+                failedCurves.Add(resultLabel);
+                continue;
+            }
+
+            int row = analyzed;
+            if (paramWks.GetNumRows() <= row)
+                paramWks.SetSize(row + 1, max(paramWks.GetNumCols(), 13));
+            double gm_uS = result.gm_S * 1.0e6;
+            double ionDensity = result.ion_A * densityFactor;
+            double ioffDensity = result.ioff_A * densityFactor;
+            double ratioLog = result.ion_ioff > 0 ? log10(result.ion_ioff) : NANUM;
+            paramWks.SetCell(row, 0, resultLabel);
+            paramWks.SetCell(row, 1, backward ? "Backward (-)" : "Forward (+)");
+            paramWks.SetCell(row, 2, result.ss_mV_dec);
+            paramWks.SetCell(row, 3, result.ss_r2);
+            paramWks.SetCell(row, 4, result.vth_V);
+            paramWks.SetCell(row, 5, result.vth_cc_V);
+            paramWks.SetCell(row, 6, result.vth_r2);
+            paramWks.SetCell(row, 7, gm_uS);
+            paramWks.SetCell(row, 8, result.mobility_cm2_Vs);
+            paramWks.SetCell(row, 9, ionDensity);
+            paramWks.SetCell(row, 10, ioffDensity);
+            paramWks.SetCell(row, 11, result.ion_ioff);
+            paramWks.SetCell(row, 12, ratioLog);
+
+            ssVals.Add(result.ss_mV_dec);
+            vthGmVals.Add(result.vth_V);
+            if (_fet_valid_number(result.vth_cc_V))
+                vthCcVals.Add(result.vth_cc_V);
+            gmVals.Add(gm_uS);
+            mobVals.Add(result.mobility_cm2_Vs);
+            ionVals.Add(ionDensity);
+            if (_fet_valid_number(ratioLog))
+                ratioVals.Add(ratioLog);
+            if (result.ss_mV_dec < bestSS)
+            {
+                bestSS = result.ss_mV_dec;
+                bestCurveIndex = cc;
+                bestResultLabel = resultLabel;
+            }
+            analyzed++;
         }
-
-        // The imported Curves sheet holds only valid Vg/Id pairs from row 0
-        // upward (trailing rows are NANUM and get cleaned), so cleaned-vector
-        // indices map 1:1 onto worksheet rows here.
-        XYRange input, ssRange, vthRange;
-        input.Add(curves, baseCol, "X", baseCol, segBegin, segEnd);
-        input.Add(curves, baseCol + 1, "Y", baseCol + 1, segBegin, segEnd);
-        ssRange.Add(curves, baseCol, "X", baseCol,
-                    indices.ssBegin, indices.ssEnd);
-        ssRange.Add(curves, baseCol + 1, "Y", baseCol + 1,
-                    indices.ssBegin, indices.ssEnd);
-        vthRange.Add(curves, baseCol, "X", baseCol,
-                     indices.vthBegin, indices.vthEnd);
-        vthRange.Add(curves, baseCol + 1, "Y", baseCol + 1,
-                     indices.vthBegin, indices.vthEnd);
-
-        FETResult result;
-        if (0 != _fet_analyze(input, ssRange, vthRange, options.device,
-                              false, false, result))
-        {
-            failedCurves.Add(label);
-            continue;
-        }
-
-        int row = analyzed;
-        if (paramWks.GetNumRows() <= row)
-            paramWks.SetSize(row + 1, max(paramWks.GetNumCols(), 13));
-        double gm_uS = result.gm_S * 1.0e6;
-        double ionDensity = result.ion_A * densityFactor;
-        double ioffDensity = result.ioff_A * densityFactor;
-        double ratioLog = result.ion_ioff > 0 ? log10(result.ion_ioff) : NANUM;
-        paramWks.SetCell(row, 0, label);
-        paramWks.SetCell(row, 1, backward ? "-" : "+");
-        paramWks.SetCell(row, 2, result.ss_mV_dec);
-        paramWks.SetCell(row, 3, result.ss_r2);
-        paramWks.SetCell(row, 4, result.vth_V);
-        paramWks.SetCell(row, 5, result.vth_cc_V);
-        paramWks.SetCell(row, 6, result.vth_r2);
-        paramWks.SetCell(row, 7, gm_uS);
-        paramWks.SetCell(row, 8, result.mobility_cm2_Vs);
-        paramWks.SetCell(row, 9, ionDensity);
-        paramWks.SetCell(row, 10, ioffDensity);
-        paramWks.SetCell(row, 11, result.ion_ioff);
-        paramWks.SetCell(row, 12, ratioLog);
-
-        ssVals.Add(result.ss_mV_dec);
-        vthGmVals.Add(result.vth_V);
-        if (_fet_valid_number(result.vth_cc_V))
-            vthCcVals.Add(result.vth_cc_V);
-        gmVals.Add(gm_uS);
-        mobVals.Add(result.mobility_cm2_Vs);
-        ionVals.Add(ionDensity);
-        if (_fet_valid_number(ratioLog))
-            ratioVals.Add(ratioLog);
-        if (result.ss_mV_dec < bestSS)
-        {
-            bestSS = result.ss_mV_dec;
-            bestCurveIndex = cc;
-        }
-        analyzed++;
     }
-    pb.Set(curveCount);
+    pb.Set(totalSegments);
     _fet_remove_progress_label(progressLayer);
     LT_execute("type -s \"Analysis complete.\";");
 
@@ -5155,11 +5248,18 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
 
     if (analyzed < 1)
     {
+        string segmentLabel;
+        if (analyzeBoth)
+            segmentLabel = "both segments";
+        else if (selectedBackward)
+            segmentLabel = "backward segment";
+        else
+            segmentLabel = "forward segment";
         summaryText.Format(
             "No curve could be analyzed with the current fitting settings "
-            "[%s segment]. Try a larger smoothing window or a lower minimum "
+            "[%s]. Try a larger smoothing window or a lower minimum "
             "R-Square.%s",
-            backward ? "backward" : "forward",
+            segmentLabel,
             overlayBuilt ? "\n\nThe overlay graph was still built." : "");
         return overlayBuilt ? 5 : 3;
     }
@@ -5222,17 +5322,29 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
     string bestSuffix = "";
     if (bestCurveIndex >= 0)
     {
-        string bestLabel;
-        bestLabel = curves.Columns(bestCurveIndex * colsPerCurve).GetComments();
-        bestSuffix.Format(" (highlighted: lowest SS = %s)", bestLabel);
+        if (bestResultLabel.IsEmpty())
+            bestResultLabel = curves.Columns(bestCurveIndex * colsPerCurve).GetComments();
+        bestSuffix.Format(" (highlighted: lowest SS = %s)", bestResultLabel);
     }
+    string segmentLabel;
+    if (analyzeBoth)
+        segmentLabel = "both segments";
+    else if (selectedBackward)
+        segmentLabel = "backward segment";
+    else
+        segmentLabel = "forward segment";
+    string targetLabel;
+    if (analyzeBoth)
+        targetLabel = "curve segment(s)";
+    else
+        targetLabel = "curve(s)";
     summaryText.Format(
-        "Analyzed %d of %d curve(s) [%s segment].\n\n"
+        "Analyzed %d of %d %s [%s].\n\n"
         "Overlay graph: \"%s\"%s\n"
         "Distribution histograms: graph \"%s\"\n"
         "Parameter table: [%s]Parameters\n"
         "Statistics summary: [%s]Statistics",
-        analyzed, curveCount, backward ? "backward" : "forward",
+        analyzed, totalSegments, targetLabel, segmentLabel,
         overlayGraphName, bestSuffix,
         statsGraphName, statsPageName, statsPageName);
     if (failedCurves.GetSize() > 0)
@@ -5269,7 +5381,7 @@ static bool _fet_get_multi_options(LPCSTR title = "FET Multi-Curve Analysis")
         GETN_NUM(Vd, "Drain Voltage Vd (V)", options.device.Vd_V)
     GETN_END_BRANCH(device)
     GETN_BEGIN_BRANCH(extract, "Fitting") GETN_OPTION_BRANCH(GETNBRANCH_OPEN)
-        GETN_LIST(Direction, "Analyzed segment", g_fet_multi_direction, "Forward (+)|Backward (-)")
+        GETN_LIST(Direction, "Analyzed segment", g_fet_multi_direction, "Forward (+)|Backward (-)|Both (+/-)")
         GETN_NUM(SmoothingWindow, "Smoothing window (odd points)", options.smoothingWindow)
         GETN_NUM(SSWindowPoints, "Automatic SS window (0 = auto)", options.ssWindowPoints)
         GETN_NUM(VthWindowPoints, "Automatic Vth window (0 = auto)", options.vthWindowPoints)
@@ -5313,7 +5425,9 @@ static bool _fet_get_multi_options(LPCSTR title = "FET Multi-Curve Analysis")
     if (options.minFitR2 > 1)
         options.minFitR2 = 1;
 
-    g_fet_multi_direction = settings.extract.Direction.nVal == 1 ? 1 : 0;
+    g_fet_multi_direction = settings.extract.Direction.nVal;
+    if (g_fet_multi_direction < 0 || g_fet_multi_direction > 2)
+        g_fet_multi_direction = 0;
     g_fet_hist_bins = (int)settings.stats.Bins.dVal;
     if (g_fet_hist_bins < 0)
         g_fet_hist_bins = 0;
@@ -5462,7 +5576,7 @@ static bool _fet_string_list_contains(const vector<string>& names, LPCSTR s)
 // Snapshots the names of all current GraphPages, for use with
 // _fet_pick_new_graph_page below. Needed because neither LT_execute()'s own
 // return value NOR Project.ActiveLayer() reliably indicates whether an
-// X-Function (currently plotmatrix for the correlation graph) actually built the graph we asked
+// X-Function (plot_marginal/plotmatrix) actually built the graph we asked
 // for: headless testing this session showed LT_execute() can return FALSE
 // even when a correct multi-layer graph was built, AND return TRUE while
 // only producing junk single-layer pages -- so the only trustworthy check
@@ -5523,7 +5637,7 @@ static bool _fet_pick_new_graph_page(const vector<string>& before, int minLayers
 // "Graph3") to a fixed, predictable page name, destroying any stale page
 // already occupying that name first -- so downstream code (the [FET Multi]
 // re-run button's source-book tag lookup, re-running the same
-// correlation operation twice, and tests) can find "the" correlation graph
+// scatter/correlation operation twice, and tests) can find "the" graph
 // by a fixed name regardless of whether the native template or the
 // hand-built fallback produced it.
 static void _fet_rename_graph_page_to(string& graphName, LPCSTR fixedName)
@@ -5583,24 +5697,22 @@ static bool _fet_build_scatter_source_sheet(Worksheet& paramsWks,
     StringArray curveNames;
     paramsWks.Columns(0).GetStringArray(curveNames);
     int paramRows = paramsWks.GetNumRows();
-    vector<string> keptNames;
-    vector<byte> keptMask;
+    int rows = 0;
     int rr;
     for (rr = 0; rr < paramRows; rr++)
     {
         string curveName = rr < curveNames.GetSize() ? curveNames[rr] : "";
         if (curveName.IsEmpty())
             continue;
+        rows = rr + 1;
         double xv = paramsWks.Cell(rr, colX);
         double yv = paramsWks.Cell(rr, colY);
-        if (is_missing_value(xv) || is_missing_value(yv))
-            continue;
-        keptNames.Add(curveName);
-        outX.Add(xv);
-        outY.Add(yv);
-        keptMask.Add(_fet_row_has_any_mask(paramsWks, rr) ? 1 : 0);
+        if (!is_missing_value(xv) && !is_missing_value(yv))
+        {
+            outX.Add(xv);
+            outY.Add(yv);
+        }
     }
-    int rows = outX.GetSize();
     if (rows < 1)
         return false;
 
@@ -5612,24 +5724,62 @@ static bool _fet_build_scatter_source_sheet(Worksheet& paramsWks,
     outWks.Columns(2).SetLongName(nameY);
     outWks.Columns(2).SetType(OKDATAOBJ_DESIGNATION_Y);
     outWks.Columns(0).SetComments("[FETStatsData]Parameters Curve");
-    outWks.Columns(1).SetComments("[FETStatsData]Parameters");
-    outWks.Columns(2).SetComments("[FETStatsData]Parameters");
+    outWks.Columns(1).SetComments("[FETStatsData]Parameters linked");
+    outWks.Columns(2).SetComments("[FETStatsData]Parameters linked");
 
     for (rr = 0; rr < rows; rr++)
     {
-        outWks.SetCell(rr, 0, keptNames[rr]);
-        outWks.SetCell(rr, 1, outX[rr]);
-        outWks.SetCell(rr, 2, outY[rr]);
+        string curveName = rr < curveNames.GetSize() ? curveNames[rr] : "";
+        outWks.SetCell(rr, 0, curveName);
+        outWks.SetCell(rr, 1, paramsWks.Cell(rr, colX));
+        outWks.SetCell(rr, 2, paramsWks.Cell(rr, colY));
     }
-    int cc;
-    for (cc = 0; cc < 3; cc++)
-    {
-        DatasetObject ds(outWks.Columns(cc));
-        if (ds)
-            ds.SetMask(keptMask, true, false);
-    }
+
+    string statsPageName = paramsWks.GetPage().GetName();
+    string paramsName = paramsWks.GetName();
+    string script;
+    WorksheetPage outPage = outWks.GetPage();
+    if (outPage)
+        outPage.SetShow(PAGE_ACTIVATE);
+    set_active_layer(outWks);
+    script.Format(
+        "csetvalue col:=col(1) formula:=\"rName$\" "
+        "script:=\"range rName=[%s]%s!col(1)\" recalculate:=1;",
+        statsPageName, paramsName);
+    LT_execute(script);
+    script.Format(
+        "csetvalue col:=col(2) formula:=\"rX\" "
+        "script:=\"range rX=[%s]%s!col(%d)\" recalculate:=1;",
+        statsPageName, paramsName, colX + 1);
+    LT_execute(script);
+    script.Format(
+        "csetvalue col:=col(3) formula:=\"rY\" "
+        "script:=\"range rY=[%s]%s!col(%d)\" recalculate:=1;",
+        statsPageName, paramsName, colY + 1);
+    LT_execute(script);
+
     outWks.AutoSize();
-    return true;
+    return outX.GetSize() > 0;
+}
+
+// Tries Origin's built-in "Marginal Histograms" graph -- the plot_marginal
+// X-Function, the same template reachable from Origin's own graph gallery.
+// Headless probing in the original implementation showed plot_marginal can
+// build a correct 3-layer graph even when LT_execute() reports failure, so
+// success is judged by the graph page that appears afterward.
+static bool _fet_try_native_marginal_plot(Worksheet& srcWks, string& graphName)
+{
+    graphName = "";
+    if (!srcWks)
+        return false;
+    vector<string> before;
+    _fet_snapshot_graph_page_names(before);
+    WorksheetPage srcPage = srcWks.GetPage();
+    if (srcPage)
+        srcPage.SetShow(PAGE_ACTIVATE);
+    set_active_layer(srcWks);
+    LT_execute("plot_marginal -r 1 iy:=(B,C) type:=0 top:=0 right:=0;");
+    return _fet_pick_new_graph_page(before, 3, graphName);
 }
 
 // Hand-built 3-layer scatter graph: a main scatter (bottom-left) plus one
@@ -5793,7 +5943,18 @@ static bool _fet_build_scatter_hist_graph(int xParamIdx, int yParamIdx,
                                          nameX, nameY, derived, vx, vy)
         || vx.GetSize() < 2)
         return false;
-    int rows = vx.GetSize();
+    int rows = derived.GetNumRows();
+
+    string graphName;
+    if (_fet_try_native_marginal_plot(derived, graphName))
+    {
+        _fet_rename_graph_page_to(graphName, FET_SCATTER_GRAPH_PAGE);
+        summaryText.Format(
+            "Scatter + marginal histograms (Origin's native Marginal "
+            "Histograms template): \"%s\" (N = %d).\n\nX: %s   Y: %s",
+            graphName, vx.GetSize(), nameX, nameY);
+        return true;
+    }
 
     string sheetName, histSheetName;
     _fet_scatter_sheet_name(nameX, nameY, sheetName);
@@ -6647,14 +6808,17 @@ void fet_analyzer_multi_analyze()
 
 void fet_analyzer_sync_parameter_masks()
 {
-    int synced = _fet_sync_overlay_masks_from_parameters(true);
-    if (synced < 0)
+    int syncedOverlay = _fet_sync_overlay_masks_from_parameters(true);
+    int syncedScatter = _fet_sync_scatter_masks_from_parameters(true);
+    if (syncedOverlay < 0 && syncedScatter < 0)
     {
         out_str("FET Gadget: run Multi-Curve Analysis first, then mask rows in [FETStatsData]Parameters.");
         return;
     }
     string msg;
-    msg.Format("FET Gadget: synchronized Parameter masks to %d overlay curve(s).", synced);
+    msg.Format("FET Gadget: synchronized Parameter masks to %d overlay curve(s) and %d scatter source sheet(s).",
+               syncedOverlay > 0 ? syncedOverlay : 0,
+               syncedScatter > 0 ? syncedScatter : 0);
     out_str(msg);
 }
 
@@ -6697,7 +6861,16 @@ int fet_analyzer_rerun_multi_analyze_for_test()
 
 int fet_analyzer_sync_parameter_masks_for_test()
 {
-    return _fet_sync_overlay_masks_from_parameters(true);
+    int overlay = _fet_sync_overlay_masks_from_parameters(true);
+    int scatter = _fet_sync_scatter_masks_from_parameters(true);
+    if (overlay < 0 && scatter < 0)
+        return overlay;
+    int total = 0;
+    if (overlay > 0)
+        total += overlay;
+    if (scatter > 0)
+        total += scatter;
+    return total;
 }
 
 // Test hooks for the scatter+histograms and correlation-matrix builders,

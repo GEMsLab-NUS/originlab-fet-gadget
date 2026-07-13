@@ -46,9 +46,9 @@ App Gallery
            -> settings dialog: 2 dropdowns (X parameter, Y parameter)
            -> rebuilds a synced 3-column source sheet inside FETStatsData,
               named from the selected pair (for example SS-Mobility):
-              Name, X, Y; row masks are copied from Parameters by curve name
-           -> builds a hand-built 3-layer graph (main scatter + marginal
-              histogram per axis) named FETScatterGraph
+              Name, X, Y; all 3 are auto-recalculate links to Parameters
+           -> tries Origin's native "Marginal Histograms" plot_marginal
+              X-Function first; hand-built 3-layer graph is only fallback
       -> Correlation Matrix:
            -> also requires [FETStatsData]Parameters
            -> settings dialog: checkboxes, which parameters to include
@@ -154,9 +154,11 @@ App Gallery
   touches the user-facing import table.
 - Batch extraction (`_fet_multi_analyze_core`) runs the same auto range
   picking and calculation core as single-curve analysis, per curve, on the
-  chosen sweep segment (forward or backward). Curves too short or that fail
-  the fit-quality gates are skipped and listed, never fatal. The curve with
-  the lowest SS among those that succeed becomes `bestCurveIndex`.
+  chosen sweep segment (forward, backward, or both). In both mode each
+  successful row's `Curve` name is suffixed with `[+]` or `[-]` so downstream
+  sheets do not see duplicate names. Curves too short or that fail the
+  fit-quality gates are skipped and listed, never fatal. The curve with the
+  lowest SS among those that succeed becomes `bestCurveIndex`.
 - `FETMultiOverlayGraph` (`_fet_build_multi_overlay_graph`) uses the classic
   fixed single-curve palette, not a per-curve rainbow: every curve on the log
   (left) axis is drawn in `options.logCurveColor` (indigo) and every curve on
@@ -172,7 +174,7 @@ App Gallery
   button (`[FET Multi]`) that re-runs `fet_analyzer_multi_analyze()` using
   its own source workbook.
 - Outputs are singletons, rebuilt per run: `[FETStatsData]Parameters` (one row
-  per analyzed curve: SS, R2s, Vthgm, Vthcc, gm in uS, mobility, Ion/Ioff
+  per analyzed curve segment: SS, R2s, Vthgm, Vthcc, gm in uS, mobility, Ion/Ioff
   densities in uA/um, ratio and log10 ratio), `[FETStatsData]Statistics`
   (N/mean/SD/median/min/max/CV per parameter, one row per of the 7 parameters), and
   `[FETStatsData]Histogram` (bin centers/counts plus normal-curve samples, 4
@@ -316,14 +318,17 @@ App Gallery
   `_fet_read_batch_param_pair` reads two columns index-aligned to the same
   curve, skipping rows with an empty `Curve` name (padding) or either value
   missing.
-- Scatter + Histograms deliberately uses the hand-built graph path so its
-  visible source data can remain in `FETStatsData` instead of creating a
-  separate `FETScatterData` workbook. `_fet_build_scatter_source_sheet`
-  rebuilds a three-column sheet named from the selected pair (`X-Y`, e.g.
-  `SS-Mobility`) with `Name`, X, and Y. It reads the current
-  `[FETStatsData]Parameters` rows by curve name, so user sorting in
-  `Parameters` does not break the pairing, and copies the row mask state to
-  all three source columns.
+- Scatter + Histograms keeps its visible source data in `FETStatsData`
+  instead of creating a separate `FETScatterData` workbook.
+  `_fet_build_scatter_source_sheet` rebuilds a three-column sheet named
+  from the selected pair (`X-Y`, e.g. `SS-Mobility`) with `Name`, X, and Y.
+  It keeps every non-empty `Curve` row from `[FETStatsData]Parameters`;
+  masked rows are not filtered out. The Name/X/Y columns are set with
+  `csetvalue ... recalculate:=1` links back to the corresponding
+  `Parameters` columns, so numeric edits in `Parameters` can be propagated
+  by Origin recalculation. Mask state is intentionally not copied at build
+  time; the `[Sync Parameter Masks]` action is the only path that applies
+  current `Parameters` masks to this source sheet.
 - Correlation Matrix still tries Origin's own built-in graph-gallery
   template via the `plotmatrix` X-Function before falling back to a
   hand-built table. Headless probing showed a failed/degenerate plotmatrix
@@ -341,18 +346,13 @@ App Gallery
   occupying it first), so downstream code can find `FETCorrelationGraph`.
 - `fet_analyzer_scatter_hist` / `_fet_get_scatter_options`: two `GETN_LIST`
   dropdowns pick the X and Y parameter. `_fet_build_scatter_hist_graph`
-  uses columns 2/3 of the paired `X-Y` source sheet for the main scatter
-  (`IDM_PLOT_SCATTER`). Histogram bin data is written to an internal
-  `X-Y-Hist` helper sheet in the same `FETStatsData` workbook so the public
-  source sheet stays at exactly three main columns. The main layer is
-  autoscaled first via `layer -a;`, then its `layer.x.from/to`/
-  `layer.y.from/to` are read back (`LT_get_var`) and applied to the top (X)
-  and right (Y) marginal layers so all three visually line up -- rather than
-  relying on any shared-axis mechanism. The top panel uses `IDM_PLOT_COLUMN`
-  (vertical bars, X=bin center/Y=count, the same type the statistics graph's
-  histograms use); the right panel uses `IDM_PLOT_BAR` with X=count and
-  Y=bin center for the horizontal-bar look. `_fet_graph_add_layer` adds the
-  two marginal layers.
+  first activates the paired `X-Y` source sheet and calls Origin's native
+  `plot_marginal -r 1 iy:=(B,C) type:=0 top:=0 right:=0` Marginal
+  Histograms template, then renames the resulting graph page to
+  `FETScatterGraph`. This native path does not create an `X-Y-Hist` helper
+  sheet. If the X-Function does not produce a real 3-layer graph, the
+  fallback writes histogram bin data to `X-Y-Hist` and builds the main
+  scatter plus top/right marginal histogram layers manually.
 - `fet_analyzer_correlation_matrix` / `_fet_get_correlation_options`: 9
   `GETN_CHECK` boxes pick which parameters to include (>=2 required).
   `_fet_build_correlation_matrix` first tries `plotmatrix`

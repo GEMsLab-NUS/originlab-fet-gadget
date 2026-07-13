@@ -11,6 +11,7 @@ int fet_import_transfer_csv_files_ex(LPCSTR lpcszFiles, TreeNode& resultTree,
 int fet_analyzer_multi_analyze_for_test(LPCSTR lpcszBook);
 int fet_analyzer_sync_parameter_masks_for_test();
 int fet_analyzer_find_multi_source_book_curve_count_for_test();
+void fet_analyzer_set_multi_direction_for_test(int direction);
 void fet_analyzer_stats_prev_param();
 void fet_analyzer_stats_next_param();
 int fet_analyzer_stats_set_param_for_test(int paramIndex);
@@ -709,11 +710,38 @@ int fet_analyzer_runtime_smoke()
             || scatterSource.Columns(1).GetLongName().CompareNoCase("Ion") != 0
             || scatterSource.Columns(2).GetLongName().CompareNoCase("SS") != 0)
             return 816;
+        StringArray scatterNames;
+        scatterSource.Columns(0).GetStringArray(scatterNames);
+        int scatterRows = 0;
+        for (int scatterRow = 0; scatterRow < scatterNames.GetSize(); scatterRow++)
+        {
+            if (!scatterNames[scatterRow].IsEmpty())
+                scatterRows++;
+        }
+        if (scatterRows != 4)
+            return 817;
         DatasetObject scatterMask(scatterSource.Columns(1));
         vector<byte> scatterMaskVals;
         scatterMask.GetMask(scatterMaskVals);
+        if (scatterMaskVals.GetSize() >= 2 && scatterMaskVals[1])
+            return 818;
+        syntheticParams.SetCell(0, 0, "LinkedCurve");
+        syntheticParams.SetCell(0, 9, 55.0);
+        LT_execute("run -p au;");
+        scatterSource.Columns(0).GetStringArray(scatterNames);
+        if (scatterNames.GetSize() < 1
+            || scatterNames[0].CompareNoCase("LinkedCurve") != 0)
+            return 823;
+        if (fabs(scatterSource.Cell(0, 1) - 55.0) > 1e-9)
+            return 819;
+        if (fet_analyzer_sync_parameter_masks_for_test() < 1)
+            return 820;
+        scatterMask.GetMask(scatterMaskVals);
         if (scatterMaskVals.GetSize() < 2 || !scatterMaskVals[1])
-            return 817;
+            return 821;
+        Worksheet scatterHist = syntheticStatsBook.Layers("Ion-SS-Hist");
+        if (scatterHist)
+            return 822;
         GraphPage scatterGraph("FETScatterGraph");
         if (!scatterGraph || scatterGraph.Layers.Count() != 3)
             return 799;
@@ -866,6 +894,82 @@ int fet_analyzer_runtime_smoke()
             || !_fet_smoke_column_has_value(doubleImportedCurves, 4)
             || !_fet_smoke_column_has_value(doubleImportedCurves, 5))
             return 489;
+
+        fet_analyzer_set_multi_direction_for_test(2); // both (+/-)
+        int doubleMultiErr = fet_analyzer_multi_analyze_for_test(
+            doubleImportResult.Workbook.strVal);
+        fet_analyzer_set_multi_direction_for_test(0);
+        if (doubleMultiErr != 0)
+            return 1500 + doubleMultiErr;
+
+        WorksheetPage doubleStatsBook("FETStatsData");
+        Worksheet doubleParams;
+        Worksheet doubleOverlay;
+        if (doubleStatsBook)
+        {
+            doubleParams = doubleStatsBook.Layers("Parameters");
+            doubleOverlay = doubleStatsBook.Layers("OverlayCurves");
+        }
+        if (!doubleParams || !doubleOverlay)
+            return 1506;
+
+        StringArray doubleCurveNames;
+        StringArray doubleSegments;
+        doubleParams.Columns(0).GetStringArray(doubleCurveNames);
+        doubleParams.Columns(1).GetStringArray(doubleSegments);
+        int doubleRows = 0;
+        bool sawForward = false;
+        bool sawBackward = false;
+        bool sawBackwardName = false;
+        bool sawBackwardSegment = false;
+        for (int dr = 0; dr < doubleCurveNames.GetSize(); dr++)
+        {
+            string curveName = doubleCurveNames[dr];
+            if (curveName.IsEmpty())
+                continue;
+            doubleRows++;
+            string segment = dr < doubleSegments.GetSize() ? doubleSegments[dr] : "";
+            string suffix = curveName;
+            if (curveName.GetLength() >= 3)
+                suffix = curveName.Right(3);
+            if (suffix.CompareNoCase("[+]") == 0
+                && segment.CompareNoCase("Forward (+)") == 0)
+                sawForward = true;
+            if (suffix.CompareNoCase("[-]") == 0)
+                sawBackwardName = true;
+            if (segment.CompareNoCase("Backward (-)") == 0)
+                sawBackwardSegment = true;
+            if (suffix.CompareNoCase("[-]") == 0
+                && segment.CompareNoCase("Backward (-)") == 0)
+                sawBackward = true;
+        }
+        if (doubleRows != 2)
+            return 1507;
+        if (!sawForward)
+            return 1511;
+        if (!sawBackwardName)
+            return 1513;
+        if (!sawBackwardSegment)
+            return 1514;
+        if (!sawBackward)
+            return 1512;
+        Worksheet doubleSummary = doubleStatsBook.Layers("Statistics");
+        if (!doubleSummary || fabs(doubleSummary.Cell(0, 2) - 2) > 1e-9)
+            return 1508;
+
+        DatasetObject doubleParamMask(doubleParams.Columns(0));
+        doubleParamMask.SetMask(0, 0, false, false);
+        if (fet_analyzer_sync_parameter_masks_for_test() < 1)
+            return 1509;
+        for (int dm = 0; dm < 4; dm++)
+        {
+            if (!_fet_smoke_column_mask_all(doubleOverlay, dm, true))
+                return 1510;
+        }
+        vector<byte> clearDoubleMask(doubleParams.GetNumRows());
+        clearDoubleMask = 0;
+        doubleParamMask.SetMask(clearDoubleMask, true, false);
+        fet_analyzer_sync_parameter_masks_for_test();
     }
     if (!g_fet_smoke_split_csv_path.IsEmpty())
     {
