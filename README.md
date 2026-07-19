@@ -132,8 +132,9 @@ Reads whichever worksheet or graph is **already active** — no file prompt.
 2. Every curve is fit automatically (progress bar + Cancel support), building:
    - **Overlay graph** (`FETMultiOverlayGraph`) — log `|Id|`/linear `Id`, all curves translucent
      except the lowest-SS one, which is solid and bold.
-   - **Statistics graph** (`FETStatsGraph`) — one histogram at a time (SS, Vthgm, Vthcc, gm,
-     µFE, Ion, log₁₀(Ion/Ioff)) with a normal-fit overlay; `[Prev]`/`[Next]` cycles through all seven.
+   - **Statistics graph** (`FETStatsGraph`) — one histogram at a time (SS, Deff, Vgmin,
+     Vgmax, Vthgm, VthSS, Vthcc, DeltaVthcc, DeltaVthSS, gm, Vgm, µFE, Ion,
+     log₁₀(Ion/Ioff)) with a normal-fit overlay; `[Prev]`/`[Next]` cycles through all fourteen.
    - **Data** (`FETStatsData`) — `Parameters`, `Statistics`, `Histogram`, `OverlayCurves` sheets.
 
 ### Scatter + Histograms / Correlation Matrix
@@ -141,8 +142,8 @@ Reads whichever worksheet or graph is **already active** — no file prompt.
 Both need `[FETStatsData]Parameters` to exist (run Multi-Curve Analysis first) and never re-fit
 curves.
 
-- **Scatter + Histograms** — pick X/Y parameters (SS, Vthgm, Vthcc, gm, Mobility, Ion, Ioff,
-  Ion/Ioff, or log₁₀ ratio); adds a synced 3-column source sheet inside `FETStatsData`
+- **Scatter + Histograms** — pick X/Y parameters (SS, Deff, Vgmin, Vgmax, Vthgm, VthSS,
+  Vthcc, DeltaVthcc, DeltaVthSS, gm, Vgm, Mobility, Ion, Ioff, Ion/Ioff, or log₁₀ ratio); adds a synced 3-column source sheet inside `FETStatsData`
   (for example `SS-Mobility`: `Name`, X, Y, all linked back to `Parameters`) and
   builds `FETScatterGraph` with Origin's native Marginal Histograms template.
 - **Correlation Matrix** — check 2+ parameters; builds `FETCorrelationGraph` (native "Scatter
@@ -167,10 +168,10 @@ covering each format:
 | Import workbook (e.g. `FETImportedData1`) | `Curves`: 6 columns per curve (`Vg`/`Id`/`Ig`/`absId`/`Vd`/`logAbsId`); `RawMeta`: skipped raw text lines, for troubleshooting import issues. |
 | Id-Vg graph | Overlaid log `\|Id\|` (left) + linear `Id` (right) axes; forward is a solid line, backward is a thinner solid line; fit lines, reference lines, and the summary box are drawn on top. |
 | Hidden workbook `FETGraphData` → `Curves` | Forward/backward split plus the full combined curve for whichever curve is currently being analyzed — feeds the graph's fit lines and hidden source plot; not normally something you need to open. |
-| Hidden workbook `FETGraphData` → `Extracted Parameters` | **The main results table.** One row per curve per direction — SS, Vthgm, Vthcc, gm, mobility, Ion/Ioff, hysteresis, and every fit parameter, ready to export or post-process. |
+| Hidden workbook `FETGraphData` → `Extracted Parameters` | **The main results table.** One row per curve per direction — Vgmin/Vgmax scan range, SS, Deff, Vthgm, VthSS, Vthcc, DeltaVthcc, DeltaVthSS, gm, Vgm, mobility, Ion/Ioff, hysteresis, and every fit parameter, ready to export or post-process. |
 | Multi-curve workbook (e.g. `FETMultiData1`) | `Curves`: 2 columns per curve (`Vg`/`Id` only, XYXY…) when more than one file was imported at once. No graph — run multi-curve analysis on this workbook next. |
 | Graph `FETMultiOverlayGraph` | Log `\|Id\|` (left, indigo) + linear `Id` (right, amber) — the classic single-curve palette, colored axes included, no legend. Most curves are genuinely translucent; the lowest-SS curve is solid, bold, and fully opaque. Carries the `[FET Multi]` re-run button. |
-| Workbook `FETStatsData` + graph `FETStatsGraph` | Multi-curve analysis output: `Parameters` (one row per analyzed curve segment; `Both (+/-)` suffixes `Curve` names with `[+]`/`[-]`), `Statistics` (N/mean/SD/median/min/max/CV per parameter), `Histogram` (bin data), `OverlayCurves` (derived data feeding the overlay graph), and a single-panel histogram graph with `[Prev]`/`[Next]` buttons to step through all seven parameters. Rebuilt on every multi-curve analysis run. |
+| Workbook `FETStatsData` + graph `FETStatsGraph` | Multi-curve analysis output: `Parameters` (one row per analyzed curve segment; `Both (+/-)` suffixes `Curve` names with `[+]`/`[-]`), `Statistics` (N/mean/SD/median/min/max/CV per parameter), `Histogram` (bin data), `OverlayCurves` (derived data feeding the overlay graph), and a single-panel histogram graph with `[Prev]`/`[Next]` buttons to step through all fourteen parameters. Rebuilt on every multi-curve analysis run. |
 | Workbook `FETStatsData` → `X-Y` sheet + graph `FETScatterGraph` | Scatter of two chosen batch parameters plus marginal histograms on each axis using Origin's native Marginal Histograms template. The source sheet is named from the selected parameters (for example `SS-Mobility`) and has exactly three main columns: `Name`, X, Y; all three columns are linked to `Parameters`, and masks update only when you run Sync Parameter Masks. |
 | Graph `FETCorrelationGraph` (or workbook `FETStatsData` → `Correlation` as a fallback) | Native Scatter Matrix plot over the parameters you checked, or — if that can't be confirmed — a Pearson correlation coefficient table. Rebuilt on every Correlation Matrix run. |
 
@@ -178,11 +179,11 @@ covering each format:
 
 | | |
 |---|---|
-| **Flexible import** | Multi-block instrument CSVs, plain `Vg/Id` tables, or explicit forward/backward columns. |
+| **Flexible import** | Multi-block instrument CSVs, plain `Vg/Id` tables, active XYXY worksheets, active Id-Vg graphs, or explicit forward/backward columns. |
 | **Auto scan detection** | Forward/backward sweeps detected and paired automatically. |
 | **Dual-axis graph** | Log `\|Id\|` + linear `Id`, normalized to `uA/um`. |
 | **Draggable fit windows** | Free range cursors per direction, no snapping to data. |
-| **One-click extraction** | SS, Vthgm, Vthcc, gm, mobility, Ion/Ioff, hysteresis — fit lines drawn on the graph. |
+| **One-click extraction** | Vgmin/Vgmax scan range, SS, Deff, Vthgm, VthSS, Vthcc, DeltaVthcc, DeltaVthSS, gm, Vgm, mobility, Ion/Ioff, hysteresis — fit lines drawn on the graph. |
 | **Live Ioff** | Drag the reference line; Ioff / Ion-Ioff recompute instantly. |
 | **Non-destructive scan mode** | Switching direction hides curves and keeps cursor positions. |
 | **Accumulating results** | One row per curve/direction — updates in place or appends. |
@@ -233,9 +234,10 @@ for the full runtime data-flow notes.
 
 ## Roadmap
 
-- Vth is reported as `Vthgm` (linear extrapolation on the gm fit window) and `Vthcc`
-  (constant-current threshold, default `1e-5 uA/um`, configurable in settings). Max-gm-only
-  threshold variants are not yet available.
+- Vth is reported as `Vthgm` (linear extrapolation on the gm fit window), `VthSS`
+  (midpoint of the SS fit window), and `Vthcc` (constant-current threshold,
+  default `1e-5 uA/um`, configurable in settings), plus `Vthgm - Vthcc` and
+  `Vthgm - VthSS` deltas.
 - Multi-curve analysis always uses automatic SS/Vth window picking; per-curve manual cursor
   adjustment is only available in the single-curve flow.
 - Multi-curve overlay translucency uses Origin's line-transparency format tag, which round-trips
