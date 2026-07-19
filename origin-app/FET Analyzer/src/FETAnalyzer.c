@@ -9,7 +9,7 @@
 #include <xfutils.h>
 #include <sys_utils.h>
 
-#define FET_APP_TITLE "FET Gadget v0.19.0"
+#define FET_APP_TITLE "FET Gadget v0.20.0"
 #define FET_MIN_POINTS 3
 #define FET_IMPORT_COLS_PER_CURVE 6
 #define FET_IMPORT_COLS_PER_CURVE_COMPACT 2
@@ -57,10 +57,13 @@
 #define FET_STATS_DATA_PAGE "FETStatsData"
 #define FET_STATS_GRAPH_PAGE "FETStatsGraph"
 #define FET_MULTI_OVERLAY_GRAPH_PAGE "FETMultiOverlayGraph"
-#define FET_STATS_PARAM_COUNT 7
-#define FET_BATCH_PARAM_COUNT 9
+#define FET_STATS_PARAM_COUNT 14
+#define FET_BATCH_PARAM_COUNT 16
 #define FET_SCATTER_GRAPH_PAGE "FETScatterGraph"
 #define FET_CORRELATION_GRAPH_PAGE "FETCorrelationGraph"
+#define FET_ACTIVE_XY_BOOK_PAGE "FETActiveXYData"
+#define FET_E_CHARGE_C 1.602176634e-19
+#define FET_IDEAL_SS_MV_DEC_300K 59.526
 
 typedef struct tagFETOptions
 {
@@ -79,11 +82,18 @@ typedef struct tagFETResult
     double ss_slope_dec_V;
     double ss_intercept;
     double ss_r2;
+    double deff_cm2_eV;
+    double vg_min_V;
+    double vg_max_V;
     double vth_V;
+    double vth_ss_V;
     double vth_cc_V;
+    double delta_vth_cc_V;
+    double delta_vth_ss_V;
     double vth_cc_current_density_uA_um;
     double vth_slope_A_V;
     double vth_intercept_A;
+    double vth_fit_sign;
     double vth_r2;
     double gm_S;
     double gm_Vg_V;
@@ -152,6 +162,7 @@ typedef struct tagFETDialogOptions
     int vthWindowPoints;
     double vthCcCurrentDensity_uA_um;
     double minFitR2;
+    bool saturationMode;
     int logCurveColor;
     int linearCurveColor;
     int ssColor;
@@ -880,7 +891,7 @@ static void _fet_configure_linear_transfer_graph(GraphLayer& gl)
     script += "layer.y2.label.suf$=\"\";";
     script += "label -yr \"\\i(I)\\-(d) (uA/um)\";";
     script += "label -xb \"\\i(V)\\-(g) (V)\";";
-    script += "layer -a;layer.y.from=0;label -r legend;";
+    script += "layer -a;label -r legend;";
     gl.LT_execute(script);
     _fet_set_right_tick_formula(gl, formula);
     _fet_set_graph_page_ratio(gl);
@@ -1962,21 +1973,77 @@ static bool _fet_extract_ss(const XYRange& ssRange, FETResult& result)
     return true;
 }
 
+static double _fet_range_vg_midpoint(const XYRange& range)
+{
+    vector vx, vy;
+    if (!_fet_get_xy(range, vx, vy) || vx.GetSize() < 1)
+        return NANUM;
+    double vmin = vx[0];
+    double vmax = vx[0];
+    for (int ii = 1; ii < vx.GetSize(); ii++)
+    {
+        vmin = min(vmin, vx[ii]);
+        vmax = max(vmax, vx[ii]);
+    }
+    return 0.5 * (vmin + vmax);
+}
+
+static double _fet_deff_from_ss(double ss_mV_dec, double cox_F_cm2)
+{
+    if (!_fet_valid_number(ss_mV_dec) || ss_mV_dec <= 0
+        || !_fet_valid_number(cox_F_cm2) || cox_F_cm2 <= 0)
+        return NANUM;
+    double deff = (cox_F_cm2 / FET_E_CHARGE_C)
+                * (ss_mV_dec / FET_IDEAL_SS_MV_DEC_300K - 1.0);
+    return deff > 0 ? deff : 0.0;
+}
+
+static double _fet_average_sign(const vector& values)
+{
+    double sum = 0;
+    int count = 0;
+    for (int ii = 0; ii < values.GetSize(); ii++)
+    {
+        if (_fet_valid_number(values[ii]) && fabs(values[ii]) > 0)
+        {
+            sum += values[ii];
+            count++;
+        }
+    }
+    return count > 0 && sum < 0 ? -1.0 : 1.0;
+}
+
 static bool _fet_extract_vth(const XYRange& vthRange, FETResult& result)
 {
-    vector vx, vy, smoothY;
+    vector vx, vy, smoothY, fitY;
     if (!_fet_get_xy(vthRange, vx, vy))
         return false;
     FETDialogOptions dialogOptions;
     _fet_get_effective_dialog_options(dialogOptions);
     _fet_smooth_vector(vy, dialogOptions.smoothingWindow, smoothY);
-    if (!_fet_linear_fit(vx, smoothY, result.vth_slope_A_V,
+
+    result.vth_fit_sign = _fet_average_sign(smoothY);
+    if (dialogOptions.saturationMode)
+    {
+        for (int ii = 0; ii < smoothY.GetSize(); ii++)
+        {
+            double current = fabs(smoothY[ii]);
+            fitY.Add(current > 0 ? sqrt(current) : 0.0);
+        }
+    }
+    else
+    {
+        fitY = smoothY;
+    }
+
+    if (!_fet_linear_fit(vx, fitY, result.vth_slope_A_V,
                          result.vth_intercept_A, result.vth_r2))
         return false;
     if (fabs(result.vth_slope_A_V) < 1e-30)
         return false;
 
-    // Linear extrapolation to Id = 0. No Vd/2 correction is applied in MVP.
+    // Linear mode extrapolates Id to zero; saturation mode extrapolates
+    // sqrt(|Id|) to zero.
     result.vth_V = -result.vth_intercept_A / result.vth_slope_A_V;
     return true;
 }
@@ -2041,6 +2108,14 @@ static bool _fet_extract_curve_metrics(const XYRange& input,
     vector vx, vy, smoothY;
     if (!_fet_get_xy(input, vx, vy))
         return false;
+
+    result.vg_min_V = vx[0];
+    result.vg_max_V = vx[0];
+    for (int rangeIndex = 1; rangeIndex < vx.GetSize(); rangeIndex++)
+    {
+        result.vg_min_V = min(result.vg_min_V, vx[rangeIndex]);
+        result.vg_max_V = max(result.vg_max_V, vx[rangeIndex]);
+    }
 
     FETDialogOptions dialogOptions;
     _fet_get_effective_dialog_options(dialogOptions);
@@ -2117,6 +2192,7 @@ static bool _fet_extract_curve_metrics(const XYRange& input,
     result.ion_signed_A = vy[ionIndex];
     result.ioff_signed_A = offSignedSum / offCount;
 
+    bool saturationMode = dialogOptions.saturationMode;
     double bestAbsGm = -1;
     int gmIndex = -1;
     double bestGm = NANUM;
@@ -2125,7 +2201,22 @@ static bool _fet_extract_curve_metrics(const XYRange& input,
         double dx = vx[ii + 1] - vx[ii - 1];
         if (fabs(dx) < 1e-30)
             continue;
-        double gm = (smoothY[ii + 1] - smoothY[ii - 1]) / dx;
+        double gm = NANUM;
+        if (saturationMode)
+        {
+            double yPrev = fabs(smoothY[ii - 1]);
+            double yNext = fabs(smoothY[ii + 1]);
+            double yHere = fabs(smoothY[ii]);
+            if (yPrev < 0 || yNext < 0 || yHere < 0)
+                continue;
+            double sqrtSlope = (sqrt(yNext) - sqrt(yPrev)) / dx;
+            double sign = smoothY[ii] < 0 ? -1.0 : 1.0;
+            gm = sign * 2.0 * sqrt(max(yHere, 0.0)) * sqrtSlope;
+        }
+        else
+        {
+            gm = (smoothY[ii + 1] - smoothY[ii - 1]) / dx;
+        }
         if (fabs(gm) > bestAbsGm)
         {
             bestAbsGm = fabs(gm);
@@ -2142,8 +2233,17 @@ static bool _fet_extract_curve_metrics(const XYRange& input,
     double effectiveCox = _fet_effective_cox(options);
     if (!_fet_valid_number(effectiveCox) || effectiveCox <= 0)
         return false;
-    result.mobility_cm2_Vs = fabs(bestGm) * (options.L_um / options.W_um)
-                           / (effectiveCox * fabs(options.Vd_V));
+    if (saturationMode)
+    {
+        result.mobility_cm2_Vs = 2.0 * (options.L_um / options.W_um)
+                               * result.vth_slope_A_V * result.vth_slope_A_V
+                               / effectiveCox;
+    }
+    else
+    {
+        result.mobility_cm2_Vs = fabs(bestGm) * (options.L_um / options.W_um)
+                               / (effectiveCox * fabs(options.Vd_V));
+    }
     result.gate_warning = "Not evaluated (Ig not supplied)";
 
     XYRange inputCopy(input);
@@ -2231,6 +2331,8 @@ static bool _fet_pick_vth_range(const vector& vx, const vector& vy,
     if (n < width || width < FET_MIN_POINTS)
         return false;
 
+    FETDialogOptions dialogOptions;
+    _fet_get_effective_dialog_options(dialogOptions);
     double bestScore = -1e300;
     begin = _fet_clamp_int(ssEnd + 1, 0, n - width);
     end = begin + width - 1;
@@ -2242,7 +2344,15 @@ static bool _fet_pick_vth_range(const vector& vx, const vector& vy,
             if (_fet_valid_number(vx[ii]) && _fet_valid_number(vy[ii]))
             {
                 winX.Add(vx[ii]);
-                winY.Add(vy[ii]);
+                if (dialogOptions.saturationMode)
+                {
+                    double current = fabs(vy[ii]);
+                    winY.Add(current > 0 ? sqrt(current) : 0.0);
+                }
+                else
+                {
+                    winY.Add(vy[ii]);
+                }
             }
         }
 
@@ -3641,7 +3751,9 @@ static bool _fet_add_graph_output(GraphLayer& gl, const XYRange& input,
     wks.Columns(cOffset + 1).SetLongName(colName);
     colName = prefix + "Vth Fit X";
     wks.Columns(cOffset + 2).SetLongName(colName);
-    colName = prefix + "Vth Fit Id";
+    colName = dialogOptions.saturationMode
+            ? prefix + "Vth Fit Id from sqrtAbsId"
+            : prefix + "Vth Fit Id";
     wks.Columns(cOffset + 3).SetLongName(colName);
     colName = prefix + "Vth Marker X";
     wks.Columns(cOffset + 4).SetLongName(colName);
@@ -3663,8 +3775,18 @@ static bool _fet_add_graph_output(GraphLayer& gl, const XYRange& input,
 
     wks.SetCell(0, cOffset + 2, gmFitMin);
     wks.SetCell(1, cOffset + 2, gmFitMax);
-    wks.SetCell(0, cOffset + 3, result.vth_slope_A_V * gmFitMin + result.vth_intercept_A);
-    wks.SetCell(1, cOffset + 3, result.vth_slope_A_V * gmFitMax + result.vth_intercept_A);
+    if (dialogOptions.saturationMode)
+    {
+        double fit0 = result.vth_slope_A_V * gmFitMin + result.vth_intercept_A;
+        double fit1 = result.vth_slope_A_V * gmFitMax + result.vth_intercept_A;
+        wks.SetCell(0, cOffset + 3, result.vth_fit_sign * fit0 * fit0);
+        wks.SetCell(1, cOffset + 3, result.vth_fit_sign * fit1 * fit1);
+    }
+    else
+    {
+        wks.SetCell(0, cOffset + 3, result.vth_slope_A_V * gmFitMin + result.vth_intercept_A);
+        wks.SetCell(1, cOffset + 3, result.vth_slope_A_V * gmFitMax + result.vth_intercept_A);
+    }
 
     wks.SetCell(0, cOffset + 4, result.vth_V);
     wks.SetCell(0, cOffset + 5, 0.0);
@@ -3756,9 +3878,26 @@ static bool _fet_add_graph_output(GraphLayer& gl, const XYRange& input,
         vthccText.Format("%.4g V", result.vth_cc_V);
     else
         vthccText = "N/A";
-    report.Format("\\b(%s)\nSS\t%.3g mV/dec\nV\\-(thgm)\t%.4g V\nV\\-(thcc)\t%s\ng\\-(m)\t%.4g S\n\\g(m)\\-(FE)\t%.4g cm\\+(2)/(V\\x(00B7)s)\nI\\-(on)\t%.4g uA/um\nI\\-(off)\t%.4g uA/um\nI\\-(on)/I\\-(off)\t%.3g",
+    string vthSSText;
+    if (_fet_valid_number(result.vth_ss_V))
+        vthSSText.Format("%.4g V", result.vth_ss_V);
+    else
+        vthSSText = "N/A";
+    string deltaText;
+    if (_fet_valid_number(result.delta_vth_cc_V))
+        deltaText.Format("%.4g V", result.delta_vth_cc_V);
+    else
+        deltaText = "N/A";
+    string deltaSSText;
+    if (_fet_valid_number(result.delta_vth_ss_V))
+        deltaSSText.Format("%.4g V", result.delta_vth_ss_V);
+    else
+        deltaSSText = "N/A";
+    report.Format("\\b(%s)\nSS\t%.3g mV/dec\nD\\-(eff)\t%.3g cm\\+(-2)eV\\+(-1)\nV\\-(thgm)\t%.4g V\nV\\-(thSS)\t%s\nV\\-(thcc)\t%s\n\\g(D)V\\-(th,cc)\t%s\n\\g(D)V\\-(th,SS)\t%s\ng\\-(m)\t%.4g S\n\\g(m)\\-(FE)\t%.4g cm\\+(2)/(V\\x(00B7)s)\nI\\-(on)\t%.4g uA/um\nI\\-(off)\t%.4g uA/um\nI\\-(on)/I\\-(off)\t%.3g",
                   backward ? "[-]" : "[+]", result.ss_mV_dec,
-                  result.vth_V, vthccText, result.gm_S, result.mobility_cm2_Vs,
+                  result.deff_cm2_eV, result.vth_V, vthSSText, vthccText,
+                  deltaText, deltaSSText,
+                  result.gm_S, result.mobility_cm2_Vs,
                   result.ion_A * densityFactor,
                   result.ioff_A * densityFactor, result.ion_ioff);
     label.Text = report;
@@ -3809,7 +3948,11 @@ static bool _fet_add_preview_output(GraphLayer& gl, const XYRange& ssRange,
     wks.Columns(0).SetLongName("SS Preview X");
     wks.Columns(1).SetLongName("SS Preview abs(Id)");
     wks.Columns(2).SetLongName("Vth Preview X");
-    wks.Columns(3).SetLongName("Vth Preview Id");
+    FETDialogOptions dialogOptions;
+    _fet_get_effective_dialog_options(dialogOptions);
+    wks.Columns(3).SetLongName(dialogOptions.saturationMode
+                               ? "Vth Preview Id from sqrtAbsId"
+                               : "Vth Preview Id");
 
     wks.SetCell(0, 0, ssMin);
     wks.SetCell(1, 0, ssMax);
@@ -3818,8 +3961,18 @@ static bool _fet_add_preview_output(GraphLayer& gl, const XYRange& ssRange,
 
     wks.SetCell(0, 2, vthMin);
     wks.SetCell(1, 2, vthMax);
-    wks.SetCell(0, 3, result.vth_slope_A_V * vthMin + result.vth_intercept_A);
-    wks.SetCell(1, 3, result.vth_slope_A_V * vthMax + result.vth_intercept_A);
+    if (dialogOptions.saturationMode)
+    {
+        double fit0 = result.vth_slope_A_V * vthMin + result.vth_intercept_A;
+        double fit1 = result.vth_slope_A_V * vthMax + result.vth_intercept_A;
+        wks.SetCell(0, 3, result.vth_fit_sign * fit0 * fit0);
+        wks.SetCell(1, 3, result.vth_fit_sign * fit1 * fit1);
+    }
+    else
+    {
+        wks.SetCell(0, 3, result.vth_slope_A_V * vthMin + result.vth_intercept_A);
+        wks.SetCell(1, 3, result.vth_slope_A_V * vthMax + result.vth_intercept_A);
+    }
 
     DataRange ssPlotRange;
     ssPlotRange.Add(wks, 0, "X", 0, 0, 1);
@@ -3844,25 +3997,27 @@ static bool _fet_add_preview_output(GraphLayer& gl, const XYRange& ssRange,
 
 static Worksheet _fet_summary_sheet()
 {
-    Worksheet wks = _fet_graph_data_sheet("Extracted Parameters", 36, false);
+    Worksheet wks = _fet_graph_data_sheet("Extracted Parameters", 42, false);
     if (!wks)
         return wks;
 
     vector<string> names = {
-        "Graph", "Source Range", "SS Range", "Vth Range", "SS", "SS R-Square",
-        "Vthgm", "Vthgm R-Square", "gm", "gm Vg", "Mobility", "Ion", "Ioff",
-        "Ion/Ioff", "L", "W", "Cox", "Cox Mode", "Oxide Thickness",
-        "Kappa", "Vd", "Ioff Vg", "Ion Vg", "Hyst Level logA",
-        "Hyst Forward Vg", "Hyst Backward Vg", "Hyst Delta Vg",
-        "Hyst Delta Vg (linear)",
-        "SS Slope", "SS Intercept", "Vth Slope", "Vth Intercept",
-        "Gate Leakage", "Curve", "Vthcc", "Vthcc Current Density"
+        "Graph", "Source Range", "Vgmin", "Vgmax", "SS Range", "Vth Range",
+        "SS", "Deff", "SS R-Square", "Vthgm", "VthSS", "Vthcc",
+        "DeltaVthcc", "DeltaVthSS", "Vthgm R-Square", "gm", "Vgm",
+        "Mobility", "Ion", "Ioff", "Ion/Ioff", "L", "W", "Cox",
+        "Cox Mode", "Oxide Thickness", "Kappa", "Vd", "Ioff Vg", "Ion Vg",
+        "Hyst Level logA", "Hyst Forward Vg", "Hyst Backward Vg",
+        "Hyst Delta Vg", "Hyst Delta Vg (linear)", "SS Slope",
+        "SS Intercept", "Vth Slope", "Vth Intercept", "Gate Leakage",
+        "Curve", "Vthcc Current Density"
     };
     vector<string> units = {
-        "", "", "", "", "mV/dec", "", "V", "", "S", "V",
-        "cm^2/(V s)", "A", "A", "", "um", "um", "F/cm^2", "",
-        "nm", "", "V", "V", "V", "", "V", "V", "V", "V",
-        "dec/V", "", "A/V", "A", "", "", "V", "uA/um"
+        "", "", "V", "V", "", "", "mV/dec", "cm^-2 eV^-1", "", "V",
+        "V", "V", "V", "V", "", "S", "V", "cm^2/(V s)", "A", "A",
+        "", "um", "um", "F/cm^2", "", "nm", "", "V", "V", "V", "",
+        "V", "V", "V", "V", "dec/V", "", "A/V", "A", "", "",
+        "uA/um"
     };
     for (int ii = 0; ii < names.GetSize(); ii++)
     {
@@ -3902,7 +4057,7 @@ static int _fet_summary_row_for_key(Worksheet& wks, LPCSTR curveKey)
     // empty even though the sheet already has rows (see above). Treat any
     // index beyond what it returns as blank too, rather than bailing out.
     StringArray sa;
-    wks.Columns(33).GetStringArray(sa);
+    wks.Columns(40).GetStringArray(sa);
 
     int firstBlank = -1;
     for (int rr = 0; rr < rows; rr++)
@@ -3924,44 +4079,50 @@ static bool _fet_write_summary_row(GraphLayer& gl, const FETOptions& options,
     if (!wks || row < 0)
         return false;
     if (wks.GetNumRows() <= row)
-        wks.SetSize(row + 1, max(wks.GetNumCols(), 36));
+        wks.SetSize(row + 1, max(wks.GetNumCols(), 42));
 
     wks.SetCell(row, 0, gl.GetPage().GetName());
     wks.SetCell(row, 1, result.source_range);
-    wks.SetCell(row, 2, result.ss_range);
-    wks.SetCell(row, 3, result.vth_range);
-    wks.SetCell(row, 4, result.ss_mV_dec);
-    wks.SetCell(row, 5, result.ss_r2);
-    wks.SetCell(row, 6, result.vth_V);
-    wks.SetCell(row, 7, result.vth_r2);
-    wks.SetCell(row, 8, result.gm_S);
-    wks.SetCell(row, 9, result.gm_Vg_V);
-    wks.SetCell(row, 10, result.mobility_cm2_Vs);
-    wks.SetCell(row, 11, result.ion_A);
-    wks.SetCell(row, 12, result.ioff_A);
-    wks.SetCell(row, 13, result.ion_ioff);
-    wks.SetCell(row, 14, options.L_um);
-    wks.SetCell(row, 15, options.W_um);
-    wks.SetCell(row, 16, _fet_effective_cox(options));
-    wks.SetCell(row, 17, options.coxMode);
-    wks.SetCell(row, 18, options.oxideThickness_nm);
-    wks.SetCell(row, 19, options.oxideKappa);
-    wks.SetCell(row, 20, options.Vd_V);
-    wks.SetCell(row, 21, result.ioff_Vg_V);
-    wks.SetCell(row, 22, result.ion_Vg_V);
-    wks.SetCell(row, 23, result.hysteresis_level_logA);
-    wks.SetCell(row, 24, result.hysteresis_forward_Vg);
-    wks.SetCell(row, 25, result.hysteresis_backward_Vg);
-    wks.SetCell(row, 26, result.hysteresis_delta_Vg);
-    wks.SetCell(row, 27, result.hysteresis_delta_Vg_linear);
-    wks.SetCell(row, 28, result.ss_slope_dec_V);
-    wks.SetCell(row, 29, result.ss_intercept);
-    wks.SetCell(row, 30, result.vth_slope_A_V);
-    wks.SetCell(row, 31, result.vth_intercept_A);
-    wks.SetCell(row, 32, result.gate_warning);
-    wks.SetCell(row, 33, curveLabel);
-    wks.SetCell(row, 34, result.vth_cc_V);
-    wks.SetCell(row, 35, result.vth_cc_current_density_uA_um);
+    wks.SetCell(row, 2, result.vg_min_V);
+    wks.SetCell(row, 3, result.vg_max_V);
+    wks.SetCell(row, 4, result.ss_range);
+    wks.SetCell(row, 5, result.vth_range);
+    wks.SetCell(row, 6, result.ss_mV_dec);
+    wks.SetCell(row, 7, result.deff_cm2_eV);
+    wks.SetCell(row, 8, result.ss_r2);
+    wks.SetCell(row, 9, result.vth_V);
+    wks.SetCell(row, 10, result.vth_ss_V);
+    wks.SetCell(row, 11, result.vth_cc_V);
+    wks.SetCell(row, 12, result.delta_vth_cc_V);
+    wks.SetCell(row, 13, result.delta_vth_ss_V);
+    wks.SetCell(row, 14, result.vth_r2);
+    wks.SetCell(row, 15, result.gm_S);
+    wks.SetCell(row, 16, result.gm_Vg_V);
+    wks.SetCell(row, 17, result.mobility_cm2_Vs);
+    wks.SetCell(row, 18, result.ion_A);
+    wks.SetCell(row, 19, result.ioff_A);
+    wks.SetCell(row, 20, result.ion_ioff);
+    wks.SetCell(row, 21, options.L_um);
+    wks.SetCell(row, 22, options.W_um);
+    wks.SetCell(row, 23, _fet_effective_cox(options));
+    wks.SetCell(row, 24, options.coxMode);
+    wks.SetCell(row, 25, options.oxideThickness_nm);
+    wks.SetCell(row, 26, options.oxideKappa);
+    wks.SetCell(row, 27, options.Vd_V);
+    wks.SetCell(row, 28, result.ioff_Vg_V);
+    wks.SetCell(row, 29, result.ion_Vg_V);
+    wks.SetCell(row, 30, result.hysteresis_level_logA);
+    wks.SetCell(row, 31, result.hysteresis_forward_Vg);
+    wks.SetCell(row, 32, result.hysteresis_backward_Vg);
+    wks.SetCell(row, 33, result.hysteresis_delta_Vg);
+    wks.SetCell(row, 34, result.hysteresis_delta_Vg_linear);
+    wks.SetCell(row, 35, result.ss_slope_dec_V);
+    wks.SetCell(row, 36, result.ss_intercept);
+    wks.SetCell(row, 37, result.vth_slope_A_V);
+    wks.SetCell(row, 38, result.vth_intercept_A);
+    wks.SetCell(row, 39, result.gate_warning);
+    wks.SetCell(row, 40, curveLabel);
+    wks.SetCell(row, 41, result.vth_cc_current_density_uA_um);
     wks.AutoSize();
     return true;
 }
@@ -3987,18 +4148,33 @@ static int _fet_analyze(const XYRange& input, const XYRange& ssRange,
     result.hysteresis_backward_Vg = NANUM;
     result.hysteresis_delta_Vg = NANUM;
     result.hysteresis_delta_Vg_linear = NANUM;
+    result.deff_cm2_eV = NANUM;
+    result.vg_min_V = NANUM;
+    result.vg_max_V = NANUM;
+    result.vth_ss_V = NANUM;
     result.vth_cc_V = NANUM;
+    result.delta_vth_cc_V = NANUM;
+    result.delta_vth_ss_V = NANUM;
     result.vth_cc_current_density_uA_um = NANUM;
+    result.vth_fit_sign = 1.0;
+    FETDialogOptions dialogOptions;
+    _fet_get_effective_dialog_options(dialogOptions);
     double effectiveCox = _fet_effective_cox(options);
     if (options.L_um <= 0 || options.W_um <= 0
         || !_fet_valid_number(effectiveCox) || effectiveCox <= 0
-        || fabs(options.Vd_V) < 1e-30)
+        || (!dialogOptions.saturationMode && fabs(options.Vd_V) < 1e-30))
         return 10;
     if (!_fet_extract_ss(ssRange, result))
         return 20;
+    result.vth_ss_V = _fet_range_vg_midpoint(ssRange);
+    result.deff_cm2_eV = _fet_deff_from_ss(result.ss_mV_dec, effectiveCox);
     if (!_fet_extract_vth(vthRange, result))
         return 30;
     _fet_extract_vth_cc(input, options, result);
+    if (_fet_valid_number(result.vth_cc_V))
+        result.delta_vth_cc_V = result.vth_V - result.vth_cc_V;
+    if (_fet_valid_number(result.vth_ss_V))
+        result.delta_vth_ss_V = result.vth_V - result.vth_ss_V;
     if (!_fet_extract_curve_metrics(input, options, result))
         return 40;
 
@@ -4035,15 +4211,22 @@ int fet_analyze_xf_core(const XYRange& input, const XYRange& ssRange,
 
     resultTree.SS.dVal = result.ss_mV_dec;
     resultTree.SS_RSquare.dVal = result.ss_r2;
+    resultTree.Deff.dVal = result.deff_cm2_eV;
+    resultTree.Vgmin.dVal = result.vg_min_V;
+    resultTree.Vgmax.dVal = result.vg_max_V;
     resultTree.Vth.dVal = result.vth_V;
     resultTree.Vthgm.dVal = result.vth_V;
     resultTree.Vthgm_RSquare.dVal = result.vth_r2;
+    resultTree.VthSS.dVal = result.vth_ss_V;
     resultTree.Vthcc.dVal = result.vth_cc_V;
+    resultTree.DeltaVthcc.dVal = result.delta_vth_cc_V;
+    resultTree.DeltaVthSS.dVal = result.delta_vth_ss_V;
     resultTree.Vthcc_CurrentDensity_uA_um.dVal =
         result.vth_cc_current_density_uA_um;
     resultTree.Vth_RSquare.dVal = result.vth_r2;
     resultTree.gm.dVal = result.gm_S;
     resultTree.gm_Vg.dVal = result.gm_Vg_V;
+    resultTree.Vgm.dVal = result.gm_Vg_V;
     resultTree.Mobility.dVal = result.mobility_cm2_Vs;
     resultTree.Ion.dVal = result.ion_A;
     resultTree.Ioff.dVal = result.ioff_A;
@@ -4193,23 +4376,33 @@ static void _fet_style_column_plot(DataPlot& plot, int red, int green, int blue)
         plot.ApplyFormat(fillFormat, true, true);
 }
 
-// Fixed name/unit/axis-title metadata for the six batch parameters, shared
+// Fixed name/unit/axis-title metadata for the stats parameters, shared
 // by the data-computation step and the single-panel renderer so both stay
 // in sync on ordering.
 static void _fet_stats_param_meta(int paramIndex, string& name, string& unit,
                                   string& axisTitle)
 {
     vector<string> names = {
-        "SS", "Vthgm", "Vthcc", "gm", "Mobility", "Ion", "log10(Ion/Ioff)"
+        "SS", "Deff", "Vgmin", "Vgmax", "Vthgm", "VthSS", "Vthcc",
+        "DeltaVthcc", "DeltaVthSS", "gm", "Vgm", "Mobility", "Ion",
+        "log10(Ion/Ioff)"
     };
     vector<string> units = {
-        "mV/dec", "V", "V", "uS", "cm^2/(V s)", "uA/um", ""
+        "mV/dec", "cm^-2 eV^-1", "V", "V", "V", "V", "V", "V", "V",
+        "uS", "V", "cm^2/(V s)", "uA/um", ""
     };
     vector<string> titles = {
         "SS (mV/dec)",
+        "\\i(D)\\-(eff) (cm\\+(-2)eV\\+(-1))",
+        "\\i(V)\\-(g,min) (V)",
+        "\\i(V)\\-(g,max) (V)",
         "\\i(V)\\-(thgm) (V)",
+        "\\i(V)\\-(thSS) (V)",
         "\\i(V)\\-(thcc) (V)",
+        "\\g(D)\\i(V)\\-(th,cc) (V)",
+        "\\g(D)\\i(V)\\-(th,SS) (V)",
         "\\i(g)\\-(m) (\\g(m)S)",
+        "\\i(V)\\-(gm) (V)",
         "\\g(m)\\-(FE) (cm\\+(2)/(V\\x(00B7)s))",
         "\\i(I)\\-(on) (\\g(m)A/\\g(m)m)",
         "log\\-(10)(\\i(I)\\-(on)/\\i(I)\\-(off))"
@@ -4222,14 +4415,16 @@ static void _fet_stats_param_meta(int paramIndex, string& name, string& unit,
     axisTitle = titles[idx];
 }
 
-// Maps a 0-8 selection index (used by the scatter and correlation-matrix
+// Maps a selection index (used by the scatter and correlation-matrix
 // dialogs) to its column in [FETStatsData]Parameters and a display name.
 // Columns 0/1 (Curve/Segment) are text, not selectable here.
 static void _fet_batch_param_col_name(int paramIndex, int& col, string& name)
 {
-    vector<int> cols = { 2, 4, 5, 7, 8, 9, 10, 11, 12 };
+    vector<int> cols = { 4, 5, 2, 3, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19 };
     vector<string> names = {
-        "SS", "Vthgm", "Vthcc", "gm", "Mobility", "Ion", "Ioff", "Ion/Ioff", "log10(Ion/Ioff)"
+        "SS", "Deff", "Vgmin", "Vgmax", "Vthgm", "VthSS", "Vthcc",
+        "DeltaVthcc", "DeltaVthSS", "gm", "Vgm", "Mobility", "Ion",
+        "Ioff", "Ion/Ioff", "log10(Ion/Ioff)"
     };
     int idx = paramIndex % cols.GetSize();
     if (idx < 0)
@@ -4659,6 +4854,137 @@ static int _fet_detect_curve_layout(Worksheet& curves)
     return FET_IMPORT_COLS_PER_CURVE;
 }
 
+static string _fet_curve_label_from_columns(Worksheet& wks, int xCol, int yCol,
+                                            int curveIndex)
+{
+    string label = wks.Columns(yCol).GetComments();
+    if (label.IsEmpty())
+        label = wks.Columns(yCol).GetLongName();
+    if (label.IsEmpty())
+        label = wks.Columns(xCol).GetComments();
+    if (label.IsEmpty())
+    {
+        label.Format("Curve %d", curveIndex + 1);
+    }
+    return label;
+}
+
+static bool _fet_write_compact_curve_block(Worksheet& curves, int curveIndex,
+                                           LPCSTR label,
+                                           const vector& vx,
+                                           const vector& vy)
+{
+    if (!curves || vx.GetSize() < FET_MIN_POINTS || vy.GetSize() < FET_MIN_POINTS)
+        return false;
+    int rows = min(vx.GetSize(), vy.GetSize());
+    int baseCol = curveIndex * FET_IMPORT_COLS_PER_CURVE_COMPACT;
+    int neededCols = baseCol + FET_IMPORT_COLS_PER_CURVE_COMPACT;
+    if (curves.GetNumCols() < neededCols || curves.GetNumRows() < rows)
+        curves.SetSize(max(curves.GetNumRows(), rows), neededCols);
+
+    curves.Columns(baseCol).SetLongName("Vg");
+    curves.Columns(baseCol).SetUnits("V");
+    curves.Columns(baseCol).SetType(OKDATAOBJ_DESIGNATION_X);
+    curves.Columns(baseCol).SetComments(label);
+    curves.Columns(baseCol + 1).SetLongName("Id");
+    curves.Columns(baseCol + 1).SetUnits("A");
+    curves.Columns(baseCol + 1).SetType(OKDATAOBJ_DESIGNATION_Y);
+    curves.Columns(baseCol + 1).SetComments(label);
+
+    int rr;
+    for (rr = 0; rr < curves.GetNumRows(); rr++)
+    {
+        curves.SetCell(rr, baseCol, rr < rows ? vx[rr] : NANUM);
+        curves.SetCell(rr, baseCol + 1, rr < rows ? vy[rr] : NANUM);
+    }
+    return true;
+}
+
+static WorksheetPage _fet_create_active_xy_source_book()
+{
+    Worksheet curves = _fet_named_page_sheet(FET_ACTIVE_XY_BOOK_PAGE,
+                                             "Curves", 2, true);
+    WorksheetPage emptyPage;
+    if (!curves)
+        return emptyPage;
+    curves.SetSize(0, 2);
+    return curves.GetPage();
+}
+
+static WorksheetPage _fet_build_multi_source_book_from_xyxy(Worksheet& srcWks)
+{
+    WorksheetPage emptyPage;
+    if (!srcWks || srcWks.GetNumCols() < 2 || srcWks.GetNumRows() < FET_MIN_POINTS)
+        return emptyPage;
+
+    WorksheetPage page = _fet_create_active_xy_source_book();
+    if (!page)
+        return emptyPage;
+    Worksheet curves = page.Layers("Curves");
+    if (!curves)
+        return emptyPage;
+
+    int curveIndex = 0;
+    int rows = srcWks.GetNumRows();
+    for (int cc = 0; cc + 1 < srcWks.GetNumCols(); cc += 2)
+    {
+        XYRange full;
+        full.Add(srcWks, cc, "X", cc, 0, rows - 1);
+        full.Add(srcWks, cc + 1, "Y", cc + 1, 0, rows - 1);
+        vector vx, vy;
+        if (!_fet_get_xy(full, vx, vy))
+            continue;
+        string label = _fet_curve_label_from_columns(srcWks, cc, cc + 1,
+                                                     curveIndex);
+        if (_fet_write_compact_curve_block(curves, curveIndex, label, vx, vy))
+            curveIndex++;
+    }
+    if (curveIndex < 1)
+        return emptyPage;
+    curves.SetSize(curves.GetNumRows(),
+                   curveIndex * FET_IMPORT_COLS_PER_CURVE_COMPACT);
+    curves.AutoSize();
+    return page;
+}
+
+static WorksheetPage _fet_build_multi_source_book_from_graph(GraphLayer& gl)
+{
+    WorksheetPage emptyPage;
+    if (!gl)
+        return emptyPage;
+
+    WorksheetPage page = _fet_create_active_xy_source_book();
+    if (!page)
+        return emptyPage;
+    Worksheet curves = page.Layers("Curves");
+    if (!curves)
+        return emptyPage;
+
+    int curveIndex = 0;
+    for (int pp = 0; pp < gl.DataPlots.Count(); pp++)
+    {
+        DataPlot plot = gl.DataPlots(pp);
+        if (!plot || !plot.IsShow() || _fet_is_helper_plot(plot))
+            continue;
+        XYRange full;
+        plot.GetDataRange(full, 0, -1);
+        vector vx, vy;
+        if (!_fet_get_xy(full, vx, vy))
+            continue;
+        string label = plot.GetDatasetName();
+        if (label.IsEmpty())
+            label.Format("Curve %d", curveIndex + 1);
+        if (_fet_write_compact_curve_block(curves, curveIndex, label, vx, vy))
+            curveIndex++;
+    }
+    if (curveIndex < 1)
+        return emptyPage;
+    curves.SetSize(curves.GetNumRows(),
+                   curveIndex * FET_IMPORT_COLS_PER_CURVE_COMPACT);
+    curves.AutoSize();
+    return page;
+}
+
 // Resolves the Curves workbook multi-curve analysis should read from: the
 // active worksheet if it (or its page) already holds one, otherwise the
 // source workbook behind the active overlay/statistics graph. This is the
@@ -4672,6 +4998,9 @@ static WorksheetPage _fet_find_multi_source_book()
         WorksheetPage wp = activeWks.GetPage();
         if (wp && wp.Layers("Curves"))
             return wp;
+        WorksheetPage xyPage = _fet_build_multi_source_book_from_xyxy(activeWks);
+        if (xyPage)
+            return xyPage;
     }
 
     GraphLayer activeGl;
@@ -4690,7 +5019,12 @@ static WorksheetPage _fet_find_multi_source_book()
                 return tagged;
         }
         GraphPage gp = activeGl.GetPage();
-        return _fet_find_import_book_for_graph(gp);
+        WorksheetPage importBook = _fet_find_import_book_for_graph(gp);
+        if (importBook)
+            return importBook;
+        WorksheetPage xyGraphBook = _fet_build_multi_source_book_from_graph(activeGl);
+        if (xyGraphBook)
+            return xyGraphBook;
     }
 
     WorksheetPage emptyPage;
@@ -5047,17 +5381,19 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
                          ? 1.0e6 / options.device.W_um : 1.0e6;
 
     Worksheet paramWks = _fet_named_page_sheet(FET_STATS_DATA_PAGE,
-                                               "Parameters", 13, true);
+                                               "Parameters", 20, true);
     if (!paramWks)
         return 1;
     vector<string> paramColNames = {
-        "Curve", "Segment", "SS", "SS R-Square", "Vthgm", "Vthcc",
-        "Vthgm R-Square", "gm", "Mobility", "Ion", "Ioff", "Ion/Ioff",
-        "log10(Ion/Ioff)"
+        "Curve", "Segment", "Vgmin", "Vgmax", "SS", "Deff", "SS R-Square",
+        "Vthgm", "VthSS", "Vthcc", "DeltaVthcc", "DeltaVthSS",
+        "Vthgm R-Square", "gm", "Vgm", "Mobility", "Ion", "Ioff",
+        "Ion/Ioff", "log10(Ion/Ioff)"
     };
     vector<string> paramColUnits = {
-        "", "", "mV/dec", "", "V", "V", "", "uS", "cm^2/(V s)",
-        "uA/um", "uA/um", "", ""
+        "", "", "V", "V", "mV/dec", "cm^-2 eV^-1", "", "V", "V",
+        "V", "V", "V", "", "uS", "V", "cm^2/(V s)", "uA/um",
+        "uA/um", "", ""
     };
     int cc;
     for (cc = 0; cc < paramColNames.GetSize(); cc++)
@@ -5085,7 +5421,9 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
     _fet_set_graph_page_ratio(progressLayer, 500, 3000);
     statsGraph.SetShow(PAGE_ACTIVATE);
 
-    vector ssVals, vthGmVals, vthCcVals, gmVals, mobVals, ionVals, ratioVals;
+    vector ssVals, deffVals, vgMinVals, vgMaxVals, vthGmVals, vthSsVals,
+           vthCcVals, deltaVthCcVals, deltaVthSsVals, vgmVals, gmVals,
+           mobVals, ionVals, ratioVals;
     vector<string> failedCurves;
     int analyzed = 0;
     int bestCurveIndex = -1;
@@ -5185,30 +5523,47 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
 
             int row = analyzed;
             if (paramWks.GetNumRows() <= row)
-                paramWks.SetSize(row + 1, max(paramWks.GetNumCols(), 13));
+                paramWks.SetSize(row + 1, max(paramWks.GetNumCols(), 20));
             double gm_uS = result.gm_S * 1.0e6;
             double ionDensity = result.ion_A * densityFactor;
             double ioffDensity = result.ioff_A * densityFactor;
             double ratioLog = result.ion_ioff > 0 ? log10(result.ion_ioff) : NANUM;
             paramWks.SetCell(row, 0, resultLabel);
             paramWks.SetCell(row, 1, backward ? "Backward (-)" : "Forward (+)");
-            paramWks.SetCell(row, 2, result.ss_mV_dec);
-            paramWks.SetCell(row, 3, result.ss_r2);
-            paramWks.SetCell(row, 4, result.vth_V);
-            paramWks.SetCell(row, 5, result.vth_cc_V);
-            paramWks.SetCell(row, 6, result.vth_r2);
-            paramWks.SetCell(row, 7, gm_uS);
-            paramWks.SetCell(row, 8, result.mobility_cm2_Vs);
-            paramWks.SetCell(row, 9, ionDensity);
-            paramWks.SetCell(row, 10, ioffDensity);
-            paramWks.SetCell(row, 11, result.ion_ioff);
-            paramWks.SetCell(row, 12, ratioLog);
+            paramWks.SetCell(row, 2, result.vg_min_V);
+            paramWks.SetCell(row, 3, result.vg_max_V);
+            paramWks.SetCell(row, 4, result.ss_mV_dec);
+            paramWks.SetCell(row, 5, result.deff_cm2_eV);
+            paramWks.SetCell(row, 6, result.ss_r2);
+            paramWks.SetCell(row, 7, result.vth_V);
+            paramWks.SetCell(row, 8, result.vth_ss_V);
+            paramWks.SetCell(row, 9, result.vth_cc_V);
+            paramWks.SetCell(row, 10, result.delta_vth_cc_V);
+            paramWks.SetCell(row, 11, result.delta_vth_ss_V);
+            paramWks.SetCell(row, 12, result.vth_r2);
+            paramWks.SetCell(row, 13, gm_uS);
+            paramWks.SetCell(row, 14, result.gm_Vg_V);
+            paramWks.SetCell(row, 15, result.mobility_cm2_Vs);
+            paramWks.SetCell(row, 16, ionDensity);
+            paramWks.SetCell(row, 17, ioffDensity);
+            paramWks.SetCell(row, 18, result.ion_ioff);
+            paramWks.SetCell(row, 19, ratioLog);
 
             ssVals.Add(result.ss_mV_dec);
+            deffVals.Add(result.deff_cm2_eV);
+            vgMinVals.Add(result.vg_min_V);
+            vgMaxVals.Add(result.vg_max_V);
             vthGmVals.Add(result.vth_V);
+            if (_fet_valid_number(result.vth_ss_V))
+                vthSsVals.Add(result.vth_ss_V);
             if (_fet_valid_number(result.vth_cc_V))
                 vthCcVals.Add(result.vth_cc_V);
+            if (_fet_valid_number(result.delta_vth_cc_V))
+                deltaVthCcVals.Add(result.delta_vth_cc_V);
+            if (_fet_valid_number(result.delta_vth_ss_V))
+                deltaVthSsVals.Add(result.delta_vth_ss_V);
             gmVals.Add(gm_uS);
+            vgmVals.Add(result.gm_Vg_V);
             mobVals.Add(result.mobility_cm2_Vs);
             ionVals.Add(ionDensity);
             if (_fet_valid_number(ratioLog))
@@ -5234,7 +5589,7 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
     {
         paramWks.SetCell(staleRow, 0, "");
         paramWks.SetCell(staleRow, 1, "");
-        for (staleCol = 2; staleCol < 13; staleCol++)
+        for (staleCol = 2; staleCol < 20; staleCol++)
             paramWks.SetCell(staleRow, staleCol, NANUM);
     }
     paramWks.AutoSize();
@@ -5285,11 +5640,18 @@ static int _fet_multi_analyze_core(WorksheetPage& book, string& summaryText)
     {
         vector vals;
         if (pp == 0) vals = ssVals;
-        else if (pp == 1) vals = vthGmVals;
-        else if (pp == 2) vals = vthCcVals;
-        else if (pp == 3) vals = gmVals;
-        else if (pp == 4) vals = mobVals;
-        else if (pp == 5) vals = ionVals;
+        else if (pp == 1) vals = deffVals;
+        else if (pp == 2) vals = vgMinVals;
+        else if (pp == 3) vals = vgMaxVals;
+        else if (pp == 4) vals = vthGmVals;
+        else if (pp == 5) vals = vthSsVals;
+        else if (pp == 6) vals = vthCcVals;
+        else if (pp == 7) vals = deltaVthCcVals;
+        else if (pp == 8) vals = deltaVthSsVals;
+        else if (pp == 9) vals = gmVals;
+        else if (pp == 10) vals = vgmVals;
+        else if (pp == 11) vals = mobVals;
+        else if (pp == 12) vals = ionVals;
         else vals = ratioVals;
 
         string paramName, paramUnit, axisTitle;
@@ -5387,10 +5749,11 @@ static bool _fet_get_multi_options(LPCSTR title = "FET Multi-Curve Analysis")
         GETN_NUM(VthWindowPoints, "Automatic Vth window (0 = auto)", options.vthWindowPoints)
         GETN_NUM(VthCcCurrent, "Vthcc current (uA/um)", options.vthCcCurrentDensity_uA_um)
         GETN_NUM(MinFitR2, "Minimum automatic fit R-Square", options.minFitR2)
+        GETN_CHECK(SaturationMode, "Saturation mode (Vds ~ Vgs - Vth)", options.saturationMode)
     GETN_END_BRANCH(extract)
     GETN_BEGIN_BRANCH(stats, "Statistics")
         GETN_NUM(Bins, "Histogram bins (0 = auto)", g_fet_hist_bins)
-        GETN_LIST(ShowParam, "Show parameter", g_fet_stats_current_param, "SS|Vthgm|Vthcc|gm|Mobility|Ion|log10(Ion/Ioff)")
+        GETN_LIST(ShowParam, "Show parameter", g_fet_stats_current_param, "SS|Deff|Vgmin|Vgmax|Vthgm|VthSS|Vthcc|DeltaVthcc|DeltaVthSS|gm|Vgm|Mobility|Ion|log10(Ion/Ioff)")
     GETN_END_BRANCH(stats)
 
     _fet_sync_cox_input_enables(settings.device);
@@ -5424,6 +5787,7 @@ static bool _fet_get_multi_options(LPCSTR title = "FET Multi-Curve Analysis")
         options.minFitR2 = 0;
     if (options.minFitR2 > 1)
         options.minFitR2 = 1;
+    options.saturationMode = settings.extract.SaturationMode.nVal != 0;
 
     g_fet_multi_direction = settings.extract.Direction.nVal;
     if (g_fet_multi_direction < 0 || g_fet_multi_direction > 2)
@@ -5462,6 +5826,7 @@ static bool _fet_multi_fit_inputs_changed(const FETDialogOptions& before,
         || before.vthWindowPoints != after.vthWindowPoints
         || before.vthCcCurrentDensity_uA_um != after.vthCcCurrentDensity_uA_um
         || before.minFitR2 != after.minFitR2
+        || before.saturationMode != after.saturationMode
         || directionBefore != directionAfter;
 }
 
@@ -5512,11 +5877,10 @@ static bool _fet_multi_rebin_from_parameters()
     if (!paramsWks || !statsWks || !histWks)
         return false;
 
-    // pp (0..FET_STATS_PARAM_COUNT-1, the stats/histogram ordering: SS,
-    // Vthgm, Vthcc, gm, Mobility, Ion, log10(Ion/Ioff)) mapped onto
-    // _fet_batch_param_col_name's wider 0..8 selection (which also has Ioff
-    // and Ion/Ioff in between).
-    vector<int> batchIndexForParam = { 0, 1, 2, 3, 4, 5, 8 };
+    // pp (0..FET_STATS_PARAM_COUNT-1, the stats/histogram ordering) mapped
+    // onto _fet_batch_param_col_name's wider selection, which also includes
+    // Ioff and Ion/Ioff.
+    vector<int> batchIndexForParam = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15 };
     int pp;
     for (pp = 0; pp < FET_STATS_PARAM_COUNT; pp++)
     {
@@ -5543,14 +5907,14 @@ static bool _fet_multi_rebin_from_parameters()
 // curves, since they're cross-parameter analyses over results that already
 // exist.
 
-static int g_fet_scatter_x_param = 5;  // Ion
+static int g_fet_scatter_x_param = 12;  // Ion
 static int g_fet_scatter_y_param = 0;  // SS
 
 static bool _fet_get_scatter_options()
 {
     GETN_BOX(settings)
-    GETN_LIST(XParam, "X-axis parameter", g_fet_scatter_x_param, "SS|Vthgm|Vthcc|gm|Mobility|Ion|Ioff|Ion/Ioff|log10(Ion/Ioff)")
-    GETN_LIST(YParam, "Y-axis parameter", g_fet_scatter_y_param, "SS|Vthgm|Vthcc|gm|Mobility|Ion|Ioff|Ion/Ioff|log10(Ion/Ioff)")
+    GETN_LIST(XParam, "X-axis parameter", g_fet_scatter_x_param, "SS|Deff|Vgmin|Vgmax|Vthgm|VthSS|Vthcc|DeltaVthcc|DeltaVthSS|gm|Vgm|Mobility|Ion|Ioff|Ion/Ioff|log10(Ion/Ioff)")
+    GETN_LIST(YParam, "Y-axis parameter", g_fet_scatter_y_param, "SS|Deff|Vgmin|Vgmax|Vthgm|VthSS|Vthcc|DeltaVthcc|DeltaVthSS|gm|Vgm|Mobility|Ion|Ioff|Ion/Ioff|log10(Ion/Ioff)")
     if (!GetNBox(settings, "FET Scatter + Histograms"))
         return false;
     g_fet_scatter_x_param = settings.XParam.nVal;
@@ -5968,15 +6332,24 @@ static bool _fet_build_scatter_hist_graph(int xParamIdx, int yParamIdx,
 
 static bool _fet_get_correlation_options(vector<int>& selected)
 {
-    bool checkSS = true, checkVthgm = true, checkVthcc = true,
-         checkGm = false, checkMob = true, checkIon = true,
+    bool checkSS = true, checkDeff = true, checkVthgm = true,
+         checkVgmin = false, checkVgmax = false, checkVthSS = true,
+         checkVthcc = true, checkDeltaVthcc = true, checkDeltaVthSS = true,
+         checkGm = false, checkVgm = false, checkMob = true, checkIon = true,
          checkIoff = false, checkRatio = false, checkLogRatio = true;
 
     GETN_BOX(settings)
     GETN_CHECK(SS, "SS", checkSS)
+    GETN_CHECK(Deff, "Deff", checkDeff)
+    GETN_CHECK(Vgmin, "Vgmin", checkVgmin)
+    GETN_CHECK(Vgmax, "Vgmax", checkVgmax)
     GETN_CHECK(Vthgm, "Vthgm", checkVthgm)
+    GETN_CHECK(VthSS, "VthSS", checkVthSS)
     GETN_CHECK(Vthcc, "Vthcc", checkVthcc)
+    GETN_CHECK(DeltaVthcc, "DeltaVthcc", checkDeltaVthcc)
+    GETN_CHECK(DeltaVthSS, "DeltaVthSS", checkDeltaVthSS)
     GETN_CHECK(Gm, "gm", checkGm)
+    GETN_CHECK(Vgm, "Vgm", checkVgm)
     GETN_CHECK(Mobility, "Mobility", checkMob)
     GETN_CHECK(Ion, "Ion", checkIon)
     GETN_CHECK(Ioff, "Ioff", checkIoff)
@@ -5987,14 +6360,21 @@ static bool _fet_get_correlation_options(vector<int>& selected)
 
     selected.SetSize(0);
     if (settings.SS.nVal) selected.Add(0);
-    if (settings.Vthgm.nVal) selected.Add(1);
-    if (settings.Vthcc.nVal) selected.Add(2);
-    if (settings.Gm.nVal) selected.Add(3);
-    if (settings.Mobility.nVal) selected.Add(4);
-    if (settings.Ion.nVal) selected.Add(5);
-    if (settings.Ioff.nVal) selected.Add(6);
-    if (settings.Ratio.nVal) selected.Add(7);
-    if (settings.LogRatio.nVal) selected.Add(8);
+    if (settings.Deff.nVal) selected.Add(1);
+    if (settings.Vgmin.nVal) selected.Add(2);
+    if (settings.Vgmax.nVal) selected.Add(3);
+    if (settings.Vthgm.nVal) selected.Add(4);
+    if (settings.VthSS.nVal) selected.Add(5);
+    if (settings.Vthcc.nVal) selected.Add(6);
+    if (settings.DeltaVthcc.nVal) selected.Add(7);
+    if (settings.DeltaVthSS.nVal) selected.Add(8);
+    if (settings.Gm.nVal) selected.Add(9);
+    if (settings.Vgm.nVal) selected.Add(10);
+    if (settings.Mobility.nVal) selected.Add(11);
+    if (settings.Ion.nVal) selected.Add(12);
+    if (settings.Ioff.nVal) selected.Add(13);
+    if (settings.Ratio.nVal) selected.Add(14);
+    if (settings.LogRatio.nVal) selected.Add(15);
     return true;
 }
 
@@ -6319,11 +6699,11 @@ int fet_analyzer_refresh_preview()
             int row = _fet_summary_row_for_key(summarySheet, forwardKey);
             if (row >= 0 && row < summarySheet.GetNumRows())
             {
-                summarySheet.SetCell(row, 23, hystResult.hysteresis_level_logA);
-                summarySheet.SetCell(row, 24, hystResult.hysteresis_forward_Vg);
-                summarySheet.SetCell(row, 25, hystResult.hysteresis_backward_Vg);
-                summarySheet.SetCell(row, 26, hystResult.hysteresis_delta_Vg);
-                summarySheet.SetCell(row, 27, hystResult.hysteresis_delta_Vg_linear);
+                summarySheet.SetCell(row, 26, hystResult.hysteresis_level_logA);
+                summarySheet.SetCell(row, 27, hystResult.hysteresis_forward_Vg);
+                summarySheet.SetCell(row, 28, hystResult.hysteresis_backward_Vg);
+                summarySheet.SetCell(row, 29, hystResult.hysteresis_delta_Vg);
+                summarySheet.SetCell(row, 30, hystResult.hysteresis_delta_Vg_linear);
             }
         }
     }
@@ -6351,6 +6731,7 @@ static void _fet_default_dialog_options(FETDialogOptions& options)
     options.vthWindowPoints = 0;
     options.vthCcCurrentDensity_uA_um = 1.0e-5;
     options.minFitR2 = 0.90;
+    options.saturationMode = false;
     options.logCurveColor = _fet_rgb_color(79, 70, 229);
     options.linearCurveColor = _fet_rgb_color(217, 119, 6);
     options.ssColor = options.logCurveColor;
@@ -6378,8 +6759,9 @@ static bool _fet_get_dialog_options(FETDialogOptions& options,
         GETN_NUM(VthWindowPoints, "Automatic Vth window (0 = auto)", options.vthWindowPoints)
         GETN_NUM(VthCcCurrent, "Vthcc current (uA/um)", options.vthCcCurrentDensity_uA_um)
         GETN_NUM(MinFitR2, "Minimum automatic fit R-Square", options.minFitR2)
+        GETN_CHECK(SaturationMode, "Saturation mode (Vds ~ Vgs - Vth)", options.saturationMode)
         GETN_STR(SSMethod, "SS method", "log10(abs(Id)) linear fit")
-        GETN_STR(VthMethod, "Vth methods", "Vthgm=Id linear extrapolation; Vthcc=constant current")
+        GETN_STR(VthMethod, "Vth methods", "Vthgm=Id linear extrapolation (linear) or sqrt(abs(Id)) extrapolation (saturation); Vthcc=constant current")
         GETN_STR(IonMethod, "Ion/Ioff method", "Ion=max abs(Id); Ioff=off-region mean / cursor")
     GETN_END_BRANCH(extract)
     GETN_BEGIN_BRANCH(cursors, "Range Cursors")
@@ -6398,7 +6780,7 @@ static bool _fet_get_dialog_options(FETDialogOptions& options,
         GETN_CHECK(ShowOnOffArrow, "Show Ion reference and movable Ioff cursor", options.showOnOffArrow)
         GETN_CHECK(ShowHysteresisCursor, "Show hysteresis opening cursor", options.showHysteresisCursor)
         GETN_STR(LeftAxis, "Left Y axis", "|Id| in uA/um; scientific tick labels")
-        GETN_STR(RightAxis, "Right Y axis", "Id in uA/um; starts at zero")
+        GETN_STR(RightAxis, "Right Y axis", "signed Id in uA/um")
     GETN_END_BRANCH(graph)
     GETN_BEGIN_BRANCH(output, "Output")
         GETN_CHECK(Annotate, "Annotate active graph", options.annotate)
@@ -6444,6 +6826,7 @@ static bool _fet_get_dialog_options(FETDialogOptions& options,
         options.minFitR2 = 0;
     if (options.minFitR2 > 1)
         options.minFitR2 = 1;
+    options.saturationMode = settings.extract.SaturationMode.nVal != 0;
     options.recreateCursors = settings.cursors.Recreate.nVal != 0;
     options.refreshGraphStyle = settings.graph.RefreshGraphStyle.nVal != 0;
     options.showFitLines = settings.graph.ShowFitLines.nVal != 0;
@@ -6554,9 +6937,12 @@ int fet_analyzer_reapply_graph_style_for_test()
     if (!LT_get_var("__FET_PAGE_ASPECT", &pageAspect)
         || fabs(pageAspect - 1.0) > 0.01)
         return 10;
-    rightLayer.LT_execute("__FET_RIGHT_FROM=layer.y.from;");
-    double rightFrom = NANUM;
-    if (!LT_get_var("__FET_RIGHT_FROM", &rightFrom) || fabs(rightFrom) > 1e-15)
+    rightLayer.LT_execute("__FET_RIGHT_FROM=layer.y.from;__FET_RIGHT_TO=layer.y.to;");
+    double rightFrom = NANUM, rightTo = NANUM;
+    if (!LT_get_var("__FET_RIGHT_FROM", &rightFrom)
+        || !LT_get_var("__FET_RIGHT_TO", &rightTo)
+        || !_fet_valid_number(rightFrom) || !_fet_valid_number(rightTo)
+        || rightTo <= rightFrom)
         return 8;
     return 0;
 }
@@ -6884,7 +7270,7 @@ int fet_analyzer_scatter_hist_for_test(int xParamIdx, int yParamIdx)
 
 int fet_analyzer_correlation_matrix_for_test()
 {
-    vector<int> selected = { 0, 1, 3 };
+    vector<int> selected = { 0, 1, 6 };
     string summary;
     return _fet_build_correlation_matrix(selected, summary);
 }

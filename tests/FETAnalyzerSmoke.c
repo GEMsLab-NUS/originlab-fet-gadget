@@ -102,7 +102,7 @@ static int _fet_smoke_find_summary_row(Worksheet& wks, LPCSTR key)
     if (rows <= 0)
         return -1;
     StringArray sa;
-    wks.Columns(33).GetStringArray(sa);
+    wks.Columns(40).GetStringArray(sa);
     for (int rr = 0; rr < rows; rr++)
     {
         string cell = rr < sa.GetSize() ? sa[rr] : "";
@@ -331,6 +331,46 @@ int fet_analyzer_runtime_smoke()
             return 204;
     }
 
+    WorksheetPage xyxyPage;
+    xyxyPage.Create("Origin");
+    xyxyPage.SetName("FETXYXYSmokeData", OCD_ENUM_NEXT);
+    Worksheet xyxyWks = xyxyPage.Layers(0);
+    xyxyWks.SetSize(vx.GetSize(), 4);
+    for (int xyCol = 0; xyCol < 4; xyCol++)
+        xyxyWks.Columns(xyCol).SetType((xyCol % 2) == 0
+                                       ? OKDATAOBJ_DESIGNATION_X
+                                       : OKDATAOBJ_DESIGNATION_Y);
+    xyxyWks.Columns(0).SetLongName("Vg");
+    xyxyWks.Columns(1).SetLongName("Id A");
+    xyxyWks.Columns(2).SetLongName("Vg");
+    xyxyWks.Columns(3).SetLongName("Id B");
+    for (int xyRow = 0; xyRow < vx.GetSize(); xyRow++)
+    {
+        xyxyWks.SetCell(xyRow, 0, vx[xyRow]);
+        xyxyWks.SetCell(xyRow, 1, vy[xyRow]);
+        xyxyWks.SetCell(xyRow, 2, vx[xyRow]);
+        xyxyWks.SetCell(xyRow, 3, -vy[xyRow]);
+    }
+    set_active_layer(xyxyWks);
+    if (fet_analyzer_find_multi_source_book_curve_count_for_test() != 2)
+        return 207;
+
+    XYRange xyxyRangeA, xyxyRangeB;
+    xyxyRangeA.Add(xyxyWks, 0, "X", 0, 0, vx.GetSize() - 1);
+    xyxyRangeA.Add(xyxyWks, 1, "Y", 1, 0, vy.GetSize() - 1);
+    xyxyRangeB.Add(xyxyWks, 2, "X", 2, 0, vx.GetSize() - 1);
+    xyxyRangeB.Add(xyxyWks, 3, "Y", 3, 0, vy.GetSize() - 1);
+    GraphPage xyxyGraph;
+    xyxyGraph.Create("Origin");
+    xyxyGraph.SetName("FETXYXYSmokeGraph", OCD_ENUM_NEXT);
+    GraphLayer xyxyLayer = xyxyGraph.Layers(0);
+    xyxyLayer.AddPlot(xyxyRangeA, IDM_PLOT_LINE);
+    xyxyLayer.AddPlot(xyxyRangeB, IDM_PLOT_LINE);
+    xyxyGraph.SetShow(PAGE_ACTIVATE);
+    set_active_layer(xyxyLayer);
+    if (fet_analyzer_find_multi_source_book_curve_count_for_test() != 2)
+        return 208;
+
     WorksheetPage results("FETGraphData");
     if (!results || !results.Layers("Curves")
         || !results.Layers("Extracted Parameters"))
@@ -473,8 +513,14 @@ int fet_analyzer_runtime_smoke()
         Worksheet overlayCurves = statsBook.Layers("OverlayCurves");
         if (!statsParams || !statsSummary || !statsHist || !overlayCurves)
             return 776;
-        if (statsParams.Columns(4).GetLongName().CompareNoCase("Vthgm") != 0
-            || statsParams.Columns(5).GetLongName().CompareNoCase("Vthcc") != 0)
+        if (statsParams.Columns(2).GetLongName().CompareNoCase("Vgmin") != 0
+            || statsParams.Columns(3).GetLongName().CompareNoCase("Vgmax") != 0
+            || statsParams.Columns(7).GetLongName().CompareNoCase("Vthgm") != 0
+            || statsParams.Columns(8).GetLongName().CompareNoCase("VthSS") != 0
+            || statsParams.Columns(9).GetLongName().CompareNoCase("Vthcc") != 0
+            || statsParams.Columns(10).GetLongName().CompareNoCase("DeltaVthcc") != 0
+            || statsParams.Columns(11).GetLongName().CompareNoCase("DeltaVthSS") != 0
+            || statsParams.Columns(14).GetLongName().CompareNoCase("Vgm") != 0)
             return 813;
         if (overlayCurves.GetNumCols() != 12)
             return 784;
@@ -499,7 +545,7 @@ int fet_analyzer_runtime_smoke()
         if (statsRows != 1)
             return 777;
         if (is_missing_value(statsParams.Cell(0, 2))
-            || is_missing_value(statsParams.Cell(0, 4)))
+            || is_missing_value(statsParams.Cell(0, 5)))
             return 782;
         if (fabs(statsSummary.Cell(0, 2) - 1) > 1e-9)
             return 783;
@@ -558,17 +604,17 @@ int fet_analyzer_runtime_smoke()
             return 842;
 
         // Regression guard: repeated same-direction clicks must keep
-        // advancing through ALL 7 parameters (not get wedged after the first
+        // advancing through ALL 14 parameters (not get wedged after the first
         // click -- an earlier version of these buttons deleted-and-recreated
         // themselves on every render, including the render triggered by
         // their own click, which corrupts Origin's click routing on that
-        // layer). A full lap of 7x [Prev] must visit 6,5,4,3,2,1,0 in that
-        // order and land back where it started, then a full lap of 7x
-        // [Next] must visit 1,2,3,4,5,6,0 -- the button objects must still
+        // layer). A full lap of 14x [Prev] must visit 13..0 in that
+        // order and land back where it started, then a full lap of 14x
+        // [Next] must visit 1..13,0 -- the button objects must still
         // exist after every single click, not just the first.
-        vector<int> expectedPrev = {6, 5, 4, 3, 2, 1, 0};
+        vector<int> expectedPrev = {13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0};
         int pn;
-        for (pn = 0; pn < 7; pn++)
+        for (pn = 0; pn < 14; pn++)
         {
             fet_analyzer_stats_prev_param();
             if (!statsLayer.GraphObjects("FET_STATS_PREV")
@@ -577,9 +623,9 @@ int fet_analyzer_runtime_smoke()
             if (fet_analyzer_stats_current_param_for_test() != expectedPrev[pn])
                 return 850 + pn;
         }
-        vector<int> expectedNext = {1, 2, 3, 4, 5, 6, 0};
+        vector<int> expectedNext = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0};
         int nn;
-        for (nn = 0; nn < 7; nn++)
+        for (nn = 0; nn < 14; nn++)
         {
             fet_analyzer_stats_next_param();
             if (!statsLayer.GraphObjects("FET_STATS_PREV")
@@ -680,25 +726,32 @@ int fet_analyzer_runtime_smoke()
             syntheticParams = syntheticStatsBook.Layers("Parameters");
         if (!syntheticParams)
             return 797;
-        syntheticParams.SetSize(4, 13);
+        syntheticParams.SetSize(4, 20);
         for (int synRow = 0; synRow < 4; synRow++)
         {
             syntheticParams.SetCell(synRow, 0, "SynthCurve");
             syntheticParams.SetCell(synRow, 1, "+");
-            syntheticParams.SetCell(synRow, 2, 80.0 + synRow * 5);
-            syntheticParams.SetCell(synRow, 4, 0.2 + synRow * 0.05);
-            syntheticParams.SetCell(synRow, 5, 0.25 + synRow * 0.04);
-            syntheticParams.SetCell(synRow, 7, 10.0 + synRow);
-            syntheticParams.SetCell(synRow, 8, 30.0 + synRow * 2);
-            syntheticParams.SetCell(synRow, 9, 5.0 + synRow);
-            syntheticParams.SetCell(synRow, 10, 0.001);
-            syntheticParams.SetCell(synRow, 11, 5000.0);
-            syntheticParams.SetCell(synRow, 12, 3.7);
+            syntheticParams.SetCell(synRow, 2, -1.0);
+            syntheticParams.SetCell(synRow, 3, 1.0);
+            syntheticParams.SetCell(synRow, 4, 80.0 + synRow * 5);
+            syntheticParams.SetCell(synRow, 5, 1.0e12 + synRow * 1.0e11);
+            syntheticParams.SetCell(synRow, 7, 0.2 + synRow * 0.05);
+            syntheticParams.SetCell(synRow, 8, 0.12 + synRow * 0.02);
+            syntheticParams.SetCell(synRow, 9, 0.25 + synRow * 0.04);
+            syntheticParams.SetCell(synRow, 10, 0.05 - synRow * 0.01);
+            syntheticParams.SetCell(synRow, 11, 0.08 + synRow * 0.03);
+            syntheticParams.SetCell(synRow, 13, 10.0 + synRow);
+            syntheticParams.SetCell(synRow, 14, 0.4 + synRow * 0.1);
+            syntheticParams.SetCell(synRow, 15, 30.0 + synRow * 2);
+            syntheticParams.SetCell(synRow, 16, 5.0 + synRow);
+            syntheticParams.SetCell(synRow, 17, 0.001);
+            syntheticParams.SetCell(synRow, 18, 5000.0);
+            syntheticParams.SetCell(synRow, 19, 3.7);
         }
         DatasetObject syntheticParamMask(syntheticParams.Columns(0));
         syntheticParamMask.SetMask(1, 1, false, false);
 
-        if (fet_analyzer_scatter_hist_for_test(5, 0) != 0)
+        if (fet_analyzer_scatter_hist_for_test(12, 0) != 0)
             return 798;
         WorksheetPage oldScatterData("FETScatterData");
         if (oldScatterData)
@@ -726,7 +779,7 @@ int fet_analyzer_runtime_smoke()
         if (scatterMaskVals.GetSize() >= 2 && scatterMaskVals[1])
             return 818;
         syntheticParams.SetCell(0, 0, "LinkedCurve");
-        syntheticParams.SetCell(0, 9, 55.0);
+        syntheticParams.SetCell(0, 16, 55.0);
         LT_execute("run -p au;");
         scatterSource.Columns(0).GetStringArray(scatterNames);
         if (scatterNames.GetSize() < 1
@@ -1257,8 +1310,8 @@ int fet_analyzer_runtime_smoke()
     if (doubleForwardRow < 0 || doubleBackwardRow < 0)
         return 637;
 
-    double currentIoff = doubleExtracted.Cell(doubleForwardRow, 12);
-    double currentRatio = doubleExtracted.Cell(doubleForwardRow, 13);
+    double currentIoff = doubleExtracted.Cell(doubleForwardRow, 19);
+    double currentRatio = doubleExtracted.Cell(doubleForwardRow, 20);
     // The Ioff cursor's .script$ now re-triggers analysis on every property
     // write (needed so dragging it live-updates Ioff/Ratio -- see
     // _fet_add_horizontal_cursor_line). Setting .y1 then .y2 in one LT_execute
@@ -1302,7 +1355,7 @@ int fet_analyzer_runtime_smoke()
     if (secondCursorErr != 0)
         return 640 + secondCursorErr;
 
-    double doubleIoffAfterSecond = doubleExtracted.Cell(doubleForwardRow, 12);
+    double doubleIoffAfterSecond = doubleExtracted.Cell(doubleForwardRow, 19);
     if (is_missing_value(doubleIoffAfterSecond)
         || fabs(doubleIoffAfterSecond - currentIoff) > 1.0e-13)
         return 646;
@@ -1391,8 +1444,8 @@ int fet_analyzer_runtime_smoke()
 
     // Both delta columns must land in the summary sheet: either a plausible
     // Vg-range value or NaN (out-of-range on one side), never garbage.
-    double hystDeltaLog = doubleExtracted.Cell(doubleForwardRow, 26);
-    double hystDeltaLinear = doubleExtracted.Cell(doubleForwardRow, 27);
+    double hystDeltaLog = doubleExtracted.Cell(doubleForwardRow, 33);
+    double hystDeltaLinear = doubleExtracted.Cell(doubleForwardRow, 34);
     double vgSpan = fabs(vx[vx.GetSize() - 1] - vx[0]);
     if (!is_missing_value(hystDeltaLog)
         && (hystDeltaLog < 0 || hystDeltaLog > vgSpan))

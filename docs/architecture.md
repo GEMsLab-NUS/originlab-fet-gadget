@@ -174,9 +174,11 @@ App Gallery
   button (`[FET Multi]`) that re-runs `fet_analyzer_multi_analyze()` using
   its own source workbook.
 - Outputs are singletons, rebuilt per run: `[FETStatsData]Parameters` (one row
-  per analyzed curve segment: SS, R2s, Vthgm, Vthcc, gm in uS, mobility, Ion/Ioff
-  densities in uA/um, ratio and log10 ratio), `[FETStatsData]Statistics`
-  (N/mean/SD/median/min/max/CV per parameter, one row per of the 7 parameters), and
+  per analyzed curve segment: Vgmin/Vgmax scan range, SS, Deff, R2s, Vthgm,
+  VthSS, Vthcc, DeltaVthcc, DeltaVthSS, gm in uS, Vgm, mobility, Ion/Ioff
+  densities in uA/um, ratio and log10 ratio),
+  `[FETStatsData]Statistics`
+  (N/mean/SD/median/min/max/CV per parameter, one row per of the 14 parameters), and
   `[FETStatsData]Histogram` (bin centers/counts plus normal-curve samples, 4
   columns per parameter). Histogram bins default to the sqrt rule clamped to
   [4, 15]; the normal overlay is scaled by `N * binWidth` so it sits directly
@@ -312,8 +314,9 @@ App Gallery
 - Both read `[FETStatsData]Parameters` directly rather than re-fitting
   curves -- they're cross-parameter analyses over batch results that must
   already exist (Multi-Curve Analysis has to have run at least once).
-  `_fet_batch_param_col_name` maps a 9-entry selection index (SS, Vthgm,
-  Vthcc, gm, Mobility, Ion, Ioff, Ion/Ioff, log10(Ion/Ioff)) to its
+  `_fet_batch_param_col_name` maps a 16-entry selection index (SS, Deff,
+  Vgmin, Vgmax, Vthgm, VthSS, Vthcc, DeltaVthcc, DeltaVthSS, gm, Vgm,
+  Mobility, Ion, Ioff, Ion/Ioff, log10(Ion/Ioff)) to its
   `Parameters` column;
   `_fet_read_batch_param_pair` reads two columns index-aligned to the same
   curve, skipping rows with an empty `Curve` name (padding) or either value
@@ -412,7 +415,7 @@ App Gallery
 ## Remaining Extensions
 
 1. Persist graph-specific settings in graph-object storage or page tree.
-2. Add maximum-gm-only Vth variants beyond the current Vthgm/Vthcc outputs.
+2. Add maximum-gm-only Vth variants beyond the current Vthgm/VthSS/Vthcc outputs.
 3. Add gate leakage analysis from `Ig`.
 4. Add batch report export.
 5. Confirm in a live interactive Origin session whether `plotmatrix`
